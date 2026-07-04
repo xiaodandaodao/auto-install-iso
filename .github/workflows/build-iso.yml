@@ -3,7 +3,7 @@ name: Build ImmortalWrt Auto-Install ISO
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 1 * *'   # 每月 1 号自动跑
+    - cron: '0 0 1 * *'
 
 permissions:
   contents: write
@@ -36,7 +36,6 @@ jobs:
         wget --tries=3 --timeout=30 "$BASE_URL/$FW_FILE" -O firmware.img.gz
         wget "$BASE_URL/sha256sums" -O sha256sums.txt
 
-        # 校验 SHA256（只校验我们下载的那个文件）
         grep "$FW_FILE" sha256sums.txt | sha256sum -c
 
         echo "解压固件..."
@@ -44,13 +43,13 @@ jobs:
         ls -lh firmware.img
 
     # ============================================================
-    #  Step 2: chroot 注入插件（官方源 + 第三方 IPK）
+    #  Step 2: chroot 注入插件
     # ============================================================
     - name: Inject Custom Packages via chroot
       run: |
         cd build
 
-        # ---------- 挂载 ext4 分区 ----------
+        # --- 挂载 ext4 分区 ---
         sudo losetup -fP firmware.img
         LOOP_DEV=$(sudo losetup -j firmware.img | cut -d: -f1)
         echo "Loop 设备: $LOOP_DEV"
@@ -62,89 +61,79 @@ jobs:
         echo "扩容前 rootfs 空间："
         df -h /mnt/rootfs
 
-        # ---------- 准备 chroot ----------
+        # --- 准备 chroot ---
         sudo mount --bind /dev  /mnt/rootfs/dev
         sudo mount --bind /proc /mnt/rootfs/proc
         sudo mount --bind /sys  /mnt/rootfs/sys
         sudo cp /etc/resolv.conf /mnt/rootfs/etc/resolv.conf
 
-        # ---------- 提前下载第三方 IPK ----------
+        # --- 下载第三方 IPK ---
         echo ">>> 下载 OpenClash IPK..."
-        # vernesong/OpenClash 最新 Release
-        OPENCLASH_URL=$(curl -s https://api.github.com/repos/vernesong/OpenClash/releases/latest | \
-          jq -r '.assets[] | select(.name | test("luci-app-openclash.*\\.ipk$")) | .browser_download_url' | head -1)
-        if [ -n "$OPENCLASH_URL" ]; then
+        OPENCLASH_URL=$(curl -s https://api.github.com/repos/vernesong/OpenClash/releases/latest | jq -r '.assets[] | select(.name | test("luci-app-openclash.*\\.ipk$")) | .browser_download_url' | head -1)
+        if [ -n "$OPENCLASH_URL" ] && [ "$OPENCLASH_URL" != "null" ]; then
           sudo wget "$OPENCLASH_URL" -O /mnt/rootfs/tmp/openclash.ipk
-          echo "  OpenClash IPK 已下载到 /tmp/openclash.ipk"
+          echo "  OpenClash IPK 已下载"
         else
           echo "  ⚠️ 未找到 OpenClash IPK，跳过"
         fi
 
         echo ">>> 下载 daed IPK..."
-        # QiuSimons/luci-app-daed 最新 Release
-        DAED_URL=$(curl -s https://api.github.com/repos/QiuSimons/luci-app-daed/releases/latest | \
-          jq -r '.assets[] | select(.name | test("luci-app-daed.*\\.ipk$")) | .browser_download_url' | head -1)
-        if [ -n "$DAED_URL" ]; then
+        DAED_URL=$(curl -s https://api.github.com/repos/QiuSimons/luci-app-daed/releases/latest | jq -r '.assets[] | select(.name | test("luci-app-daed.*\\.ipk$")) | .browser_download_url' | head -1)
+        if [ -n "$DAED_URL" ] && [ "$DAED_URL" != "null" ]; then
           sudo wget "$DAED_URL" -O /mnt/rootfs/tmp/daed.ipk
-          echo "  daed IPK 已下载到 /tmp/daed.ipk"
+          echo "  daed IPK 已下载"
         else
           echo "  ⚠️ 未找到 daed IPK，跳过"
         fi
 
-        # ---------- chroot 内安装脚本 ----------
-        cat << 'INNER_SCRIPT' | sudo tee /mnt/rootfs/root/install.sh
-#!/bin/sh
-set -e
+        # --- 将安装脚本写入文件（避免 YAML 内嵌 heredoc） ---
+        sudo tee /mnt/rootfs/root/install.sh > /dev/null << 'ENDOFSCRIPT'
+        #!/bin/sh
+        set -e
 
-echo "============================================"
-echo "  ImmortalWrt 插件注入中..."
-echo "============================================"
+        echo "============================================"
+        echo "  ImmortalWrt 插件注入中..."
+        echo "============================================"
 
-# 1. 更新官方源
-opkg update
+        opkg update
 
-# 2. 安装 SQM（QoS）-- 官方源
-echo ">>> 安装 SQM (QoS)..."
-opkg install luci-app-sqm sqm-scripts
+        echo ">>> 安装 SQM (QoS)..."
+        opkg install luci-app-sqm sqm-scripts
 
-# 3. 安装 OpenClash（第三方 IPK）
-if [ -f /tmp/openclash.ipk ]; then
-  echo ">>> 安装 OpenClash..."
-  opkg install /tmp/openclash.ipk || echo "  ⚠️ OpenClash 安装失败，可能需要额外依赖"
-  rm -f /tmp/openclash.ipk
-else
-  echo "  ⚠️ OpenClash IPK 不存在，跳过"
-fi
+        if [ -f /tmp/openclash.ipk ]; then
+          echo ">>> 安装 OpenClash..."
+          opkg install /tmp/openclash.ipk || echo "  ⚠️ OpenClash 安装失败"
+          rm -f /tmp/openclash.ipk
+        else
+          echo "  ⚠️ OpenClash IPK 不存在，跳过"
+        fi
 
-# 4. 安装 daed（第三方 IPK）
-if [ -f /tmp/daed.ipk ]; then
-  echo ">>> 安装 daed..."
-  opkg install /tmp/daed.ipk || echo "  ⚠️ daed 安装失败，可能需要额外依赖"
-  rm -f /tmp/daed.ipk
-else
-  echo "  ⚠️ daed IPK 不存在，跳过"
-fi
+        if [ -f /tmp/daed.ipk ]; then
+          echo ">>> 安装 daed..."
+          opkg install /tmp/daed.ipk || echo "  ⚠️ daed 安装失败"
+          rm -f /tmp/daed.ipk
+        else
+          echo "  ⚠️ daed IPK 不存在，跳过"
+        fi
 
-# 5. 安装中文语言包（可选但推荐）
-echo ">>> 安装中文语言包..."
-opkg install luci-i18n-base-zh-cn || true
-opkg install luci-i18n-opkg-zh-cn || true
-opkg install luci-i18n-firewall-zh-cn || true
-opkg install luci-i18n-sqm-zh-cn || true
+        echo ">>> 安装中文语言包..."
+        opkg install luci-i18n-base-zh-cn || true
+        opkg install luci-i18n-opkg-zh-cn || true
+        opkg install luci-i18n-firewall-zh-cn || true
+        opkg install luci-i18n-sqm-zh-cn || true
 
-# 6. 清理
-opkg clean
-rm -f /tmp/opkg-lists/*
+        opkg clean
+        rm -f /tmp/opkg-lists/*
 
-echo "============================================"
-echo "  插件注入完成！"
-echo "============================================"
-INNER_SCRIPT
+        echo "============================================"
+        echo "  插件注入完成！"
+        echo "============================================"
+        ENDOFSCRIPT
 
         sudo chmod +x /mnt/rootfs/root/install.sh
         sudo chroot /mnt/rootfs /bin/sh /root/install.sh
 
-        # ---------- 卸载 ----------
+        # --- 卸载 ---
         sudo rm /mnt/rootfs/root/install.sh
         sudo rm /mnt/rootfs/etc/resolv.conf
         sudo umount /mnt/rootfs/dev
@@ -165,13 +154,10 @@ INNER_SCRIPT
         echo "扩容前镜像大小："
         ls -lh firmware.img
 
-        # 追加 2GB
         dd if=/dev/zero bs=1M count=2048 >> firmware.img
 
-        # 扩展分区 2 到镜像末尾
         sudo parted -s firmware.img resizepart 2 100%
 
-        # 挂载并扩展文件系统
         sudo losetup -fP firmware.img
         LOOP_DEV=$(sudo losetup -j firmware.img | cut -d: -f1)
         sudo e2fsck -fy ${LOOP_DEV}p2
@@ -186,11 +172,10 @@ INNER_SCRIPT
         echo "扩容后镜像大小："
         ls -lh firmware.img
 
-        # 统一重命名
         mv firmware.img immortalwrt.img
 
     # ============================================================
-    #  Step 4: 封装进 Alpine 自动安装 ISO
+    #  Step 4: 下载 Alpine 并封装 ISO
     # ============================================================
     - name: Download Alpine ISO Base
       run: |
@@ -199,7 +184,7 @@ INNER_SCRIPT
         echo "下载 Alpine 引导镜像..."
         wget --tries=3 --timeout=20 "$ALPINE_URL" -O alpine.iso
 
-    - name: Extract Alpine ISO
+    - name: Extract Alpine ISO and Embed Firmware
       run: |
         cd build
         mkdir iso_root
@@ -212,74 +197,75 @@ INNER_SCRIPT
         cd build
         mkdir -p overlay/etc
 
-        cat << 'EOF' > overlay/etc/inittab
-::sysinit:/sbin/openrc sysinit
-::sysinit:/sbin/openrc boot
-::wait:/sbin/openrc default
-tty1::respawn:/bin/sh /etc/auto_install.sh
-tty2::respawn:/sbin/getty 38400 tty2
-tty3::respawn:/sbin/getty 38400 tty3
-::ctrlaltdel:/sbin/reboot
-::shutdown:/sbin/openrc shutdown
-EOF
+        # --- inittab ---
+        tee overlay/etc/inittab > /dev/null << 'ENDOFSCRIPT'
+        ::sysinit:/sbin/openrc sysinit
+        ::sysinit:/sbin/openrc boot
+        ::wait:/sbin/openrc default
+        tty1::respawn:/bin/sh /etc/auto_install.sh
+        tty2::respawn:/sbin/getty 38400 tty2
+        tty3::respawn:/sbin/getty 38400 tty3
+        ::ctrlaltdel:/sbin/reboot
+        ::shutdown:/sbin/openrc shutdown
+        ENDOFSCRIPT
 
-        cat << 'SCRIPT' > overlay/etc/auto_install.sh
-#!/bin/sh
-sleep 2
-clear
-echo -e "\033[36m====================================================\033[0m"
-echo -e "\033[32m   欢迎使用 ImmortalWrt 物理机自动安装系统\033[0m"
-echo -e "\033[36m====================================================\033[0m"
-echo ""
+        # --- auto_install.sh ---
+        tee overlay/etc/auto_install.sh > /dev/null << 'ENDOFSCRIPT'
+        #!/bin/sh
+        sleep 2
+        clear
+        echo -e "\033[36m====================================================\033[0m"
+        echo -e "\033[32m   欢迎使用 ImmortalWrt 物理机自动安装系统\033[0m"
+        echo -e "\033[36m====================================================\033[0m"
+        echo ""
 
-IMG_PATH=""
-for mnt in /media/cdrom /media/usb; do
-  if [ -f "$mnt/immortalwrt.img" ]; then
-    IMG_PATH="$mnt/immortalwrt.img"
-    break
-  fi
-done
+        IMG_PATH=""
+        for mnt in /media/cdrom /media/usb; do
+          if [ -f "$mnt/immortalwrt.img" ]; then
+            IMG_PATH="$mnt/immortalwrt.img"
+            break
+          fi
+        done
 
-if [ -z "$IMG_PATH" ]; then
-  echo -e "\033[31m❌ 错误：在启动盘中未找到固件镜像！\033[0m"
-  while :; do sleep 1000; done
-fi
+        if [ -z "$IMG_PATH" ]; then
+          echo -e "\033[31m❌ 错误：在启动盘中未找到固件镜像！\033[0m"
+          while :; do sleep 1000; done
+        fi
 
-# 多盘保护：只允许一块硬盘
-candidates=""
-for dev in /sys/block/*; do
-  [ ! -e "$dev" ] && continue
-  b=$(basename $dev)
-  echo "$b" | grep -Eq "^(loop|ram|sr|fd)" && continue
-  readlink -f "$dev" | grep -q "usb" && continue
-  candidates="$candidates /dev/$b"
-done
+        candidates=""
+        for dev in /sys/block/*; do
+          [ ! -e "$dev" ] && continue
+          b=$(basename $dev)
+          echo "$b" | grep -Eq "^(loop|ram|sr|fd)" && continue
+          readlink -f "$dev" | grep -q "usb" && continue
+          candidates="$candidates /dev/$b"
+        done
 
-count=$(echo $candidates | wc -w)
-if [ "$count" -eq 0 ]; then
-  echo -e "\033[31m❌ 未找到可用硬盘！\033[0m"
-  poweroff -f
-elif [ "$count" -gt 1 ]; then
-  echo -e "\033[31m❌ 发现多个硬盘 $candidates，无法自动选择！\033[0m"
-  echo "请只保留一块目标硬盘后重试。"
-  poweroff -f
-fi
+        count=$(echo $candidates | wc -w)
+        if [ "$count" -eq 0 ]; then
+          echo -e "\033[31m❌ 未找到可用硬盘！\033[0m"
+          poweroff -f
+        elif [ "$count" -gt 1 ]; then
+          echo -e "\033[31m❌ 发现多个硬盘 $candidates，无法自动选择！\033[0m"
+          echo "请只保留一块目标硬盘后重试。"
+          poweroff -f
+        fi
 
-TARGET_DISK=$candidates
-echo -e "----> \033[32m[ 目标硬盘 ] : $TARGET_DISK\033[0m"
-echo -e "----> \033[31m[ 警告 ] : 5 秒后开始写入！\033[0m"
-sleep 5
+        TARGET_DISK=$candidates
+        echo -e "----> \033[32m[ 目标硬盘 ] : $TARGET_DISK\033[0m"
+        echo -e "----> \033[31m[ 警告 ] : 5 秒后开始写入！\033[0m"
+        sleep 5
 
-echo -e "----> \033[33m正在写入镜像...\033[0m"
-dd if="$IMG_PATH" of=$TARGET_DISK bs=4M
-sync
+        echo -e "----> \033[33m正在写入镜像...\033[0m"
+        dd if="$IMG_PATH" of=$TARGET_DISK bs=4M
+        sync
 
-echo -e "\033[32m   🎉 写入成功！\033[0m"
-echo -e "\033[31m   请拔掉 U 盘后重启！\033[0m"
-sleep 5
-poweroff -f
-while :; do sleep 1000; done
-SCRIPT
+        echo -e "\033[32m   🎉 写入成功！\033[0m"
+        echo -e "\033[31m   请拔掉 U 盘后重启！\033[0m"
+        sleep 5
+        poweroff -f
+        while :; do sleep 1000; done
+        ENDOFSCRIPT
 
         chmod +x overlay/etc/auto_install.sh
         cd overlay
