@@ -232,8 +232,7 @@ jobs:
           echo ""
           echo "📦 构建自动安装 initramfs..."
           mkdir -p initramfs_dir/{bin,dev,proc,sys,tmp,mnt,etc,usr/sbin}
-
-          cp /usr/bin/busybox-static initramfs_dir/bin/busybox
+          cp "$(which busybox)" initramfs_dir/bin/busybox
           chmod +x initramfs_dir/bin/busybox
 
           sudo mknod -m 600 initramfs_dir/dev/console c 5 1 2>/dev/null || true
