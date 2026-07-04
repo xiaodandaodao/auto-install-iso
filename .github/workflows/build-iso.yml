@@ -121,9 +121,6 @@ jobs:
           echo "🔄 更新 opkg..."
           opkg update || true
 
-          # ============================================================
-          # 【核心修复 2A】: 在固件系统内下载 ISO 文件系统和光驱所需的内核模块
-          # ============================================================
           echo "📦 下载光驱与 ISO9660 内核模块..."
           opkg install kmod-fs-isofs kmod-scsi-cdrom || true
 
@@ -164,9 +161,6 @@ jobs:
           echo "✅ daede 安装流程完成"
           CHROOT_EOF
 
-          # ============================================================
-          # 【核心修复 2B】: 从固件提取刚生成的 .ko 模块，存放到临时目录供给 initramfs 提取
-          # ============================================================
           echo "📂 正在提取内核模块，准备打包进隔离的 initramfs..."
           mkdir -p ../kernel_modules
           sudo find /mnt/rootfs/lib/modules/ -name "cdrom.ko" -o -name "sr_mod.ko" -o -name "isofs.ko" | xargs -I {} sudo cp {} ../kernel_modules/
@@ -193,9 +187,6 @@ jobs:
           echo "  构建无人值守安装 ISO 镜像"
           echo "=========================================="
 
-          # ============================================================
-          # 提取内核：内核位于分区1（vfat 引导分区）
-          # ============================================================
           echo ""
           echo "📋 当前分区表："
           fdisk -l firmware.img
@@ -248,7 +239,6 @@ jobs:
           cp "$(which busybox)" initramfs_dir/bin/busybox
           chmod +x initramfs_dir/bin/busybox
 
-          # 【核心修复 2C】: 将光驱和文件系统模块拷入 initramfs 核心空间
           if [ -d "kernel_modules" ] && [ "$(ls -A kernel_modules)" ]; then
             cp kernel_modules/*.ko initramfs_dir/lib/modules/
             echo "✅ 已成功向 initramfs 写入光驱相关内核模块"
@@ -265,12 +255,10 @@ jobs:
           /bin/busybox mount -t sysfs sysfs /sys
           /bin/busybox mount -t devtmpfs devtmpfs /dev
 
-          # 【核心修复 2D】: 在挂载环境前激活内核的光驱及 ISO 格式解析能力
           /bin/busybox insmod /lib/modules/cdrom.ko 2>/dev/null
           /bin/busybox insmod /lib/modules/sr_mod.ko 2>/dev/null
           /bin/busybox insmod /lib/modules/isofs.ko 2>/dev/null
 
-          # 强制刷新设备拓扑
           /bin/busybox mdev -s
 
           /bin/busybox setsid /bin/busybox cttyhack /bin/busybox sh -c '
@@ -305,7 +293,6 @@ jobs:
           FIRMWARE_PATH=""
           BOOT_DEV=""
 
-          # 【核心修复 2E】: 引入循环重试及双虚拟光驱扫描机制，保障硬件总线就绪
           for retry in 1 2 3; do
             echo "  🔍 正在定位固件镜像 (尝试第 $retry/3 次)..."
             for part in /dev/sr0 /dev/sr1 \
@@ -348,6 +335,7 @@ jobs:
             SIZE=$(cat "$blk/size" 2>/dev/null)
             [ -z "$SIZE" ] && continue
             SIZE_GB=$((SIZE * 512 / 1073741824))
+            DISK_NUM=$VE_NUM + 1
             DISK_NUM=$((DISK_NUM + 1))
             DISKS="$DISKS /dev/$DEV"
             echo "    [$DISK_NUM] /dev/$DEV  (${SIZE_GB} GB)"
@@ -485,7 +473,7 @@ jobs:
           cp initramfs.gz iso_root/boot/initramfs.gz
           cp firmware.img iso_root/firmware.img
 
-          # ISOLINUX (Legacy BIOS) 文件拷贝
+          # ISOLINUX (Legacy BIOS)
           cp /usr/lib/ISOLINUX/isolinux.bin iso_root/isolinux/
           cp /usr/lib/syslinux/modules/bios/ldlinux.c32 iso_root/isolinux/ 2>/dev/null || true
           cp /usr/lib/syslinux/modules/bios/libcom32.c32 iso_root/isolinux/ 2>/dev/null || true
@@ -512,15 +500,9 @@ jobs:
             KERNEL /boot/vmlinuz
             INITRD /boot/initramfs.gz
             APPEND console=tty0 console=ttyS0,115200n8 manual
-
-          LABEL debug
-            MENU LABEL ^3 调试模式 (详细输出)
-            KERNEL /boot/vmlinuz
-            INITRD /boot/initramfs.gz
-            APPEND console=tty0 console=ttyS0,115200n8 debug verbose
           ISOCFG
 
-          # GRUB2 (UEFI) 菜单文件配置
+          # GRUB2 (UEFI) 
           cat > iso_root/boot/grub/grub.cfg << 'GRUBCFG'
           set default=0
           set timeout=5
@@ -535,10 +517,10 @@ jobs:
           GRUBCFG
 
           # ============================================================
-          # 【核心修复 1】: 重新设计独立可寻址的 UEFI 镜像结构
+          # 【核心修复 1】: 重新编译包含 linux 模块的 UEFI 镜像结构
           # ============================================================
-          echo "  ⚙️ 构建集成多文件系统的独立 GRUB UEFI 引导程序..."
-          grub-mkimage -O x86_64-efi -o bootx64.efi -p /boot/grub part_gpt part_msdos iso9660 fat ext2 normal search configfile echo test
+          echo "  ⚙️ 构建集成多文件系统的独立 GRUB UEFI 引导程序 (补充 linux 引导命令支持)..."
+          grub-mkimage -O x86_64-efi -o bootx64.efi -p /boot/grub part_gpt part_msdos iso9660 fat ext2 normal search configfile echo test linux
 
           echo "  ⚙️ 生成规范的 FAT16 EFI 引导软盘映像..."
           dd if=/dev/zero of=iso_root/efi.img bs=1K count=4096 2>/dev/null
@@ -575,9 +557,7 @@ jobs:
 
           sha256sum immortalwrt-x86-64-daede-autoinstall.iso > immortalwrt-x86-64-daede-autoinstall.iso.sha256
 
-          # ============================================================
-          # 压缩原始固件供单独下载
-          # ============================================================
+          # 压缩原始固件
           echo ""
           echo "📦 压缩原始固件以供单独下载..."
           gzip -f firmware.img
@@ -601,18 +581,8 @@ jobs:
             本次自动构建完成于 ${{ github.event.repository.updated_at }}。
 
             **包含文件：**
-            - `immortalwrt-x86-64-daede.img.gz` 固件镜像（可直接用 `dd` 写入磁盘）
-            - `immortalwrt-x86-64-daede-autoinstall.iso` 无人值守安装 ISO（支持 BIOS/UEFI 双启动）
-
-            **ISO 使用方法：**
-            1. 将 ISO 写入 USB：`sudo dd if=immortalwrt-x86-64-daede-autoinstall.iso of=/dev/sdX bs=4M conv=fsync`
-            2. 从 USB 启动目标机器
-            3. 安装程序将自动选择非启动磁盘写入固件
-            4. 完成后自动关机，移除 USB 重启即可
-
-            **固件压缩包使用方法：**
-            - 下载 `immortalwrt-x86-64-daede.img.gz`
-            - 解压后直接写入目标磁盘：`gunzip -c immortalwrt-x86-64-daede.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`
+            - `immortalwrt-x86-64-daede.img.gz` 固件镜像
+            - `immortalwrt-x86-64-daede-autoinstall.iso` 无人值守安装 ISO（支持 UEFI 核心引导指令修复版）
           files: |
             build/immortalwrt-x86-64-daede.img.gz
             build/immortalwrt-x86-64-daede.img.gz.sha256
