@@ -1,4 +1,4 @@
-name: Build ImmortalWrt with Daede
+name: Build ImmortalWrt auto-install-ISO
 
 on:
   workflow_dispatch:
@@ -55,17 +55,23 @@ jobs:
 
           echo "✅ 固件解压完成（gunzip 警告已忽略，退出码=$GUNZIP_EXIT）"
 
+          # 输出分区信息供后续步骤使用
+          echo ""
+          echo "📋 分区信息："
+          fdisk -l firmware.img
+
       - name: 扩容 rootfs 分区
         run: |
           cd build
           echo "📏 扩容固件（+512MB）..."
           qemu-img resize firmware.img +512M
 
+          # 分区2 是 rootfs（ext4）
           OFFSET=$(fdisk -l firmware.img | grep firmware.img2 | awk '{print $2}')
           SECT_SIZE=$(fdisk -l firmware.img | grep "Sector size" | awk '{print $4}')
           OFFSET_BYTES=$((OFFSET * SECT_SIZE))
 
-          echo "  分区2起始偏移: $OFFSET 扇区 = $OFFSET_BYTES 字节"
+          echo "  分区2 (rootfs) 起始偏移: $OFFSET 扇区 = $OFFSET_BYTES 字节"
 
           sudo losetup -o $OFFSET_BYTES /dev/loop0 firmware.img
           sudo e2fsck -fy /dev/loop0 || true
@@ -77,6 +83,7 @@ jobs:
         run: |
           cd build
 
+          # 分区2 = rootfs
           OFFSET=$(fdisk -l firmware.img | grep firmware.img2 | awk '{print $2}')
           SECT_SIZE=$(fdisk -l firmware.img | grep "Sector size" | awk '{print $4}')
           OFFSET_BYTES=$((OFFSET * SECT_SIZE))
@@ -178,37 +185,56 @@ jobs:
           # 安装 ISO 构建依赖
           sudo apt-get install -y isolinux xorriso grub-pc-bin grub-efi-amd64-bin mtools busybox-static
 
-          # 提取内核
-          OFFSET=$(fdisk -l firmware.img | grep firmware.img2 | awk '{print $2}')
+          # ============================================================
+          # 关键修正：内核在分区1（vfat 引导分区），不在分区2（rootfs）
+          # ============================================================
+          echo ""
+          echo "📋 当前分区表："
+          fdisk -l firmware.img
+
+          # 分区1 = vfat boot 分区（存放 vmlinuz）
+          PART1_OFFSET=$(fdisk -l firmware.img | grep firmware.img1 | awk '{print $2}')
           SECT_SIZE=$(fdisk -l firmware.img | grep "Sector size" | awk '{print $4}')
-          OFFSET_BYTES=$((OFFSET * SECT_SIZE))
+          PART1_OFFSET_BYTES=$((PART1_OFFSET * SECT_SIZE))
 
-          echo "📂 挂载 rootfs 提取内核..."
-          sudo mkdir -p /mnt/rootfs
-          sudo mount -o loop,offset=$OFFSET_BYTES firmware.img /mnt/rootfs
+          echo ""
+          echo "📂 挂载分区1 (vfat 引导分区) 提取内核..."
+          echo "  分区1 起始偏移: $PART1_OFFSET 扇区 = $PART1_OFFSET_BYTES 字节"
 
-          if [ -f /mnt/rootfs/boot/vmlinuz ]; then
-            sudo cp /mnt/rootfs/boot/vmlinuz ./vmlinuz
+          sudo mkdir -p /mnt/bootpart
+          sudo mount -o loop,offset=$PART1_OFFSET_BYTES firmware.img /mnt/bootpart
+
+          echo "  分区1 内容："
+          ls -la /mnt/bootpart/
+
+          # 在 vfat 引导分区中查找内核
+          if [ -f /mnt/bootpart/vmlinuz ]; then
+            sudo cp /mnt/bootpart/vmlinuz ./vmlinuz
+            echo "✅ 内核已提取: vmlinuz"
+          elif [ -f /mnt/bootpart/boot/vmlinuz ]; then
+            sudo cp /mnt/bootpart/boot/vmlinuz ./vmlinuz
             echo "✅ 内核已提取: boot/vmlinuz"
-          elif [ -f /mnt/rootfs/boot/vmlinuz-* ]; then
-            sudo cp /mnt/rootfs/boot/vmlinuz-* ./vmlinuz
-            echo "✅ 内核已提取 (带版本号)"
           else
-            KERNEL=$(sudo find /mnt/rootfs/boot -name 'vmlinuz*' -type f 2>/dev/null | head -1)
+            # 通配查找
+            KERNEL=$(sudo find /mnt/bootpart -name 'vmlinuz*' -type f 2>/dev/null | head -1)
             if [ -n "$KERNEL" ]; then
               sudo cp "$KERNEL" ./vmlinuz
               echo "✅ 内核已提取: $KERNEL"
             else
               echo "❌ 未找到内核文件!"
-              sudo ls -la /mnt/rootfs/boot/
+              echo "  分区1 完整内容："
+              sudo find /mnt/bootpart -type f
+              sudo umount /mnt/bootpart
               exit 1
             fi
           fi
 
-          sudo umount /mnt/rootfs
+          sudo umount /mnt/bootpart
           echo "  内核大小: $(ls -lh vmlinuz | awk '{print $5}')"
 
+          # ============================================================
           # 构建 initramfs
+          # ============================================================
           echo ""
           echo "📦 构建自动安装 initramfs..."
           mkdir -p initramfs_dir/{bin,dev,proc,sys,tmp,mnt,etc,usr/sbin}
@@ -418,7 +444,9 @@ jobs:
           cd ..
           echo "  initramfs 大小: $(ls -lh initramfs.gz | awk '{print $5}')"
 
+          # ============================================================
           # 构建 ISO 目录结构
+          # ============================================================
           echo ""
           echo "💿 构建 ISO 文件系统..."
 
@@ -430,7 +458,7 @@ jobs:
           cp initramfs.gz iso_root/boot/initramfs.gz
           cp firmware.img iso_root/firmware.img
 
-          # ISOLINUX
+          # ISOLINUX (BIOS)
           cp /usr/lib/ISOLINUX/isolinux.bin iso_root/isolinux/
           cp /usr/lib/syslinux/modules/bios/ldlinux.c32 iso_root/isolinux/ 2>/dev/null || true
           cp /usr/lib/syslinux/modules/bios/libcom32.c32 iso_root/isolinux/ 2>/dev/null || true
@@ -465,7 +493,7 @@ jobs:
             APPEND console=tty0 console=ttyS0,115200n8 debug verbose
           ISOCFG
 
-          # GRUB2
+          # GRUB2 (UEFI)
           cat > iso_root/boot/grub/grub.cfg << 'GRUBCFG'
           set default=0
           set timeout=5
@@ -492,7 +520,9 @@ jobs:
           mcopy -i efi.img firmware.img ::firmware.img 2>/dev/null || true
           mcopy -i efi.img iso_root/boot/grub/grub.cfg ::boot/grub/grub.cfg 2>/dev/null || true
 
+          # ============================================================
           # 构建 ISO
+          # ============================================================
           echo ""
           echo "🔨 构建 ISO 镜像..."
 
@@ -517,10 +547,11 @@ jobs:
           echo ""
           echo "✅ ISO 构建完成!"
 
-          # 生成校验文件
           sha256sum immortalwrt-x86-64-daede-autoinstall.iso > immortalwrt-x86-64-daede-autoinstall.iso.sha256
 
+          # ============================================================
           # 压缩原始固件供单独下载
+          # ============================================================
           echo ""
           echo "📦 压缩原始固件以供单独下载..."
           gzip -k firmware.img
