@@ -79,7 +79,7 @@ jobs:
           cd build
 
           # 使用 sfdisk 获取分区2偏移
-          PART2_START=$(sfdisk -l firmware.img | grep "firmware.img2" | awk '{print $2}')
+          PART2_START=$(sfdisk -d firmware.img | grep "firmware.img2" | sed 's/.*start=\s*\([0-9]*\).*/\1/')
           SECT_SIZE=$(fdisk -l firmware.img | grep "Sector size" | awk '{print $4}')
           OFFSET_BYTES=$((PART2_START * SECT_SIZE))
 
@@ -188,7 +188,7 @@ jobs:
           fdisk -l firmware.img
 
           # 使用 sfdisk 获取分区1起始扇区
-          PART1_START=$(sfdisk -l firmware.img | grep "firmware.img1" | awk '{print $2}')
+          PART1_START=$(sfdisk -d firmware.img | grep "firmware.img1" | sed 's/.*start=\s*\([0-9]*\).*/\1/')
           SECT_SIZE=$(fdisk -l firmware.img | grep "Sector size" | awk '{print $4}')
           PART1_OFFSET_BYTES=$((PART1_START * SECT_SIZE))
 
