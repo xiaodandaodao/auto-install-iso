@@ -49,19 +49,19 @@ jobs:
 
         echo "解压固件..."
         # 解压固件，忽略 "trailing garbage ignored" 警告（退出码 2）
-       set +e
-       gunzip firmware.img.gz
-       GUNZIP_STATUS=$?
-       set -e
-       if [ $GUNZIP_STATUS -ne 0 ] && [ $GUNZIP_STATUS -ne 2 ]; then
+        set +e
+        gunzip firmware.img.gz
+        GUNZIP_STATUS=$?
+        set -e
+        if [ $GUNZIP_STATUS -ne 0 ] && [ $GUNZIP_STATUS -ne 2 ]; then
           echo "❌ 解压失败，退出码: $GUNZIP_STATUS"
           exit $GUNZIP_STATUS
-       fi
-       if [ ! -f firmware.img ]; then
-       echo "❌ 解压后找不到 firmware.img"
-       exit 1
-       fi
-       echo "✅ 固件解压完成 (warning ignored)"
+        fi
+        if [ ! -f firmware.img ]; then
+        echo "❌ 解压后找不到 firmware.img"
+        exit 1
+        fi
+        echo "✅ 固件解压完成 (warning ignored)"
         ls -lh firmware.img
 
     # ============================================================
