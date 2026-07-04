@@ -549,7 +549,7 @@ jobs:
           # ============================================================
           echo ""
           echo "📦 压缩原始固件以供单独下载..."
-          gzip -k firmware.img
+          gzip -f firmware.img
           mv firmware.img.gz immortalwrt-x86-64-daede.img.gz
           sha256sum immortalwrt-x86-64-daede.img.gz > immortalwrt-x86-64-daede.img.gz.sha256
 
