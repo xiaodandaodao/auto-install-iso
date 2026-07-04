@@ -36,7 +36,16 @@ jobs:
         wget --tries=3 --timeout=30 "$BASE_URL/$FW_FILE" -O firmware.img.gz
         wget "$BASE_URL/sha256sums" -O sha256sums.txt
 
-        grep "$FW_FILE" sha256sums.txt | sha256sum -c
+        # 手动提取哈希对比（sha256sums 里的文件名带 * 前缀，sha256sum -c 无法直接解析）
+        EXPECTED=$(grep "$FW_FILE" sha256sums.txt | awk '{print $1}')
+        ACTUAL=$(sha256sum firmware.img.gz | awk '{print $1}')
+        if [ "$EXPECTED" != "$ACTUAL" ]; then
+          echo "❌ SHA256 校验失败！"
+          echo "   期望值: $EXPECTED"
+          echo "   实际值: $ACTUAL"
+          exit 1
+        fi
+        echo "✅ SHA256 校验通过"
 
         echo "解压固件..."
         gunzip firmware.img.gz
