@@ -5,6 +5,9 @@ on:
   schedule:
     - cron: '0 0 * * 0'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -33,7 +36,6 @@ jobs:
           echo "🔍 校验 SHA256..."
           grep "generic-ext4-combined.img.gz" sha256sums.txt | sha256sum -c || echo "⚠️ 校验失败但继续"
 
-          # ===== 关键修复1: 忽略 gunzip 对尾部垃圾数据的警告（退出码2）=====
           echo "📦 解压固件..."
           set +e
           gunzip -k firmware.img.gz 2>gunzip_err.log
@@ -85,7 +87,6 @@ jobs:
           echo "📊 扩容后 rootfs 空间："
           df -h /mnt/rootfs
 
-          # ===== 关键修复2: resolv.conf 悬空软链接 =====
           echo "🔧 修复 /etc/resolv.conf 悬空软链接..."
           if [ -L /mnt/rootfs/etc/resolv.conf ]; then
             echo "  检测到悬空软链接: $(ls -la /mnt/rootfs/etc/resolv.conf)"
@@ -93,23 +94,19 @@ jobs:
             echo "  已删除悬空软链接"
           fi
 
-          # 创建 /tmp/resolv.conf.d 目录（软链接指向的目标）
           sudo mkdir -p /mnt/rootfs/tmp/resolv.conf.d
           echo "# placeholder" | sudo tee /mnt/rootfs/tmp/resolv.conf.d/resolv.conf.auto
 
-          # 写入实际 DNS 配置
           echo "nameserver 223.5.5.5" | sudo tee /mnt/rootfs/etc/resolv.conf
           echo "nameserver 119.29.29.29" | sudo tee -a /mnt/rootfs/etc/resolv.conf
           echo "✅ DNS 配置完成"
 
-          # ---- chroot 安装 daede ----
           echo "🔧 配置 chroot 环境..."
           sudo mount -t proc proc /mnt/rootfs/proc
           sudo mount -t sysfs sysfs /mnt/rootfs/sys
           sudo mount -o bind /dev /mnt/rootfs/dev
           sudo mount -o bind /dev/pts /mnt/rootfs/dev/pts
 
-          # 复制宿主机 DNS 到 chroot 内
           sudo cp /etc/resolv.conf /mnt/rootfs/etc/resolv.conf
 
           echo "📦 安装 daede（dae + daed + luci-app-daede）..."
@@ -117,19 +114,15 @@ jobs:
           sudo chroot /mnt/rootfs /bin/ash << 'CHROOT_EOF'
           set -e
 
-          # 先更新 opkg
           echo "🔄 更新 opkg..."
           opkg update || true
 
-          # 安装基础依赖
           echo "📦 安装依赖..."
           opkg install ca-bundle curl wget || true
 
-          # ===== 使用 kenzok8/openwrt-daede 一键安装脚本 =====
           echo "📥 下载并执行 daede 安装脚本..."
           cd /tmp
 
-          # 尝试直接下载（GitHub raw）
           wget -q -O install.sh \
             "https://raw.githubusercontent.com/kenzok8/openwrt-daede/refs/heads/main/scripts/install.sh" \
             || wget --no-check-certificate -q -O install.sh \
@@ -140,8 +133,6 @@ jobs:
             chmod +x install.sh
             ash install.sh || {
               echo "⚠️ 一键安装脚本失败，尝试备用方式..."
-
-              # 备用方案：使用 feed 源方式
               wget -qO- "https://down.dllkids.xyz/openwrt-feed/openwrt-feed-setup.sh" | sh || true
               opkg update --allow-untrusted || true
               opkg install dae daed luci-app-daede --force-depends || true
@@ -153,49 +144,422 @@ jobs:
             opkg install dae daed luci-app-daede --force-depends || true
           fi
 
-          # 验证安装
           echo ""
           echo "🔍 验证安装结果..."
           echo "---"
-          which dae 2>/dev/null && echo "✅ dae 已安装: $(dae version 2>/dev/null || echo 'ok')" || echo "⚠️ dae 未找到"
-          which daed 2>/dev/null && echo "✅ daed 已安装" || echo "⚠️ daed 未找到（如只装 dae 可忽略）"
+          which dae 2>/dev/null && echo "✅ dae 已安装" || echo "⚠️ dae 未找到"
+          which daed 2>/dev/null && echo "✅ daed 已安装" || echo "⚠️ daed 未找到"
           ls /usr/lib/lua/luci/controller/daede.lua 2>/dev/null && echo "✅ luci-app-daede 已安装" || echo "⚠️ luci-app-daede 未找到"
           echo "---"
           echo "✅ daede 安装流程完成"
           CHROOT_EOF
 
-          # ---- 卸载 chroot ----
           echo "🧹 清理 chroot 挂载..."
           sudo umount /mnt/rootfs/dev/pts 2>/dev/null || true
           sudo umount /mnt/rootfs/dev 2>/dev/null || true
           sudo umount /mnt/rootfs/proc 2>/dev/null || true
           sudo umount /mnt/rootfs/sys 2>/dev/null || true
 
-          # ---- 恢复 resolv.conf ----
           echo "🧹 恢复 /etc/resolv.conf 软链接..."
           sudo rm -f /mnt/rootfs/etc/resolv.conf
           sudo ln -sf /tmp/resolv.conf.d/resolv.conf.auto /mnt/rootfs/etc/resolv.conf || true
 
-          # 卸载
           sudo umount /mnt/rootfs
           echo "✅ 定制完成"
 
-      - name: 压缩并输出固件
+      - name: 构建 ISO 并准备 Release 产物
         run: |
           cd build
-          echo "📦 压缩固件..."
-          gzip -c firmware.img > immortalwrt-x86-64-daede.img.gz
 
+          echo "=========================================="
+          echo "  构建无人值守安装 ISO 镜像"
+          echo "=========================================="
+
+          # 安装 ISO 构建依赖
+          sudo apt-get install -y isolinux xorriso grub-pc-bin grub-efi-amd64-bin mtools busybox-static
+
+          # 提取内核
+          OFFSET=$(fdisk -l firmware.img | grep firmware.img2 | awk '{print $2}')
+          SECT_SIZE=$(fdisk -l firmware.img | grep "Sector size" | awk '{print $4}')
+          OFFSET_BYTES=$((OFFSET * SECT_SIZE))
+
+          echo "📂 挂载 rootfs 提取内核..."
+          sudo mkdir -p /mnt/rootfs
+          sudo mount -o loop,offset=$OFFSET_BYTES firmware.img /mnt/rootfs
+
+          if [ -f /mnt/rootfs/boot/vmlinuz ]; then
+            sudo cp /mnt/rootfs/boot/vmlinuz ./vmlinuz
+            echo "✅ 内核已提取: boot/vmlinuz"
+          elif [ -f /mnt/rootfs/boot/vmlinuz-* ]; then
+            sudo cp /mnt/rootfs/boot/vmlinuz-* ./vmlinuz
+            echo "✅ 内核已提取 (带版本号)"
+          else
+            KERNEL=$(sudo find /mnt/rootfs/boot -name 'vmlinuz*' -type f 2>/dev/null | head -1)
+            if [ -n "$KERNEL" ]; then
+              sudo cp "$KERNEL" ./vmlinuz
+              echo "✅ 内核已提取: $KERNEL"
+            else
+              echo "❌ 未找到内核文件!"
+              sudo ls -la /mnt/rootfs/boot/
+              exit 1
+            fi
+          fi
+
+          sudo umount /mnt/rootfs
+          echo "  内核大小: $(ls -lh vmlinuz | awk '{print $5}')"
+
+          # 构建 initramfs
+          echo ""
+          echo "📦 构建自动安装 initramfs..."
+          mkdir -p initramfs_dir/{bin,dev,proc,sys,tmp,mnt,etc,usr/sbin}
+
+          cp /usr/bin/busybox-static initramfs_dir/bin/busybox
+          chmod +x initramfs_dir/bin/busybox
+
+          sudo mknod -m 600 initramfs_dir/dev/console c 5 1 2>/dev/null || true
+          sudo mknod -m 666 initramfs_dir/dev/null    c 1 3 2>/dev/null || true
+          sudo mknod -m 666 initramfs_dir/dev/zero    c 1 5 2>/dev/null || true
+
+          cat > initramfs_dir/init << 'INITSCRIPT'
+          #!/bin/busybox sh
+
+          /bin/busybox mount -t proc proc /proc
+          /bin/busybox mount -t sysfs sysfs /sys
+          /bin/busybox mount -t devtmpfs devtmpfs /dev
+
+          /bin/busybox setsid /bin/busybox cttyhack /bin/busybox sh -c '
+          clear
+          echo ""
+          echo "  ╔══════════════════════════════════════════╗"
+          echo "  ║   ImmortalWrt 无人值守安装器            ║"
+          echo "  ║   Auto-Installer v1.0                    ║"
+          echo "  ╚══════════════════════════════════════════╝"
+          echo ""
+          echo "  ⚠️  警告: 即将自动清除目标磁盘全部数据!"
+          echo ""
+
+          echo "  📋 检测到的磁盘设备:"
+          echo "  ─────────────────────────────────────────"
+          for blk in /sys/block/sd* /sys/block/nvme* /sys/block/vd* /sys/block/mmcblk*; do
+            [ -d "$blk" ] || continue
+            DEV=$(basename "$blk")
+            SIZE=$(cat "$blk/size" 2>/dev/null)
+            if [ -n "$SIZE" ]; then
+              SIZE_GB=$((SIZE * 512 / 1073741824))
+              echo "    /dev/$DEV  (${SIZE_GB} GB)"
+            fi
+          done
+          echo "  ─────────────────────────────────────────"
+          echo ""
+
+          CMDLINE=$(cat /proc/cmdline 2>/dev/null)
+          echo "  🔍 内核参数: $CMDLINE"
+          echo ""
+
+          FIRMWARE_PATH=""
+          BOOT_DEV=""
+
+          echo "  🔍 正在定位固件镜像..."
+          for part in /dev/sr0 \
+                      /dev/sd[a-z] /dev/sd[a-z][1-9] /dev/sd[a-z]1[0-9] \
+                      /dev/nvme[0-9]n[0-9]p[1-9] /dev/nvme[0-9]n[0-9]p1[0-9] \
+                      /dev/vd[a-z] /dev/vd[a-z][1-9]; do
+            [ -b "$part" ] || continue
+            mkdir -p /mnt/search 2>/dev/null
+            if mount -o ro "$part" /mnt/search 2>/dev/null; then
+              if [ -f /mnt/search/firmware.img ]; then
+                FIRMWARE_PATH="/mnt/search/firmware.img"
+                BOOT_DEV="$part"
+                echo "  ✅ 找到固件: $part -> firmware.img"
+                echo "     大小: $(ls -lh /mnt/search/firmware.img | awk "{print \$5}")"
+                break
+              fi
+              umount /mnt/search 2>/dev/null
+            fi
+          done
+
+          if [ -z "$FIRMWARE_PATH" ]; then
+            echo "  ❌ 未找到固件镜像 firmware.img!"
+            echo "  💡 进入调试 shell..."
+            exec /bin/busybox sh
+          fi
+
+          echo ""
+          echo "  🎯 选择目标安装磁盘:"
+          echo "  ─────────────────────────────────────────"
+          DISK_NUM=0
+          DISKS=""
+          for blk in /sys/block/sd* /sys/block/nvme* /sys/block/vd* /sys/block/mmcblk*; do
+            [ -d "$blk" ] || continue
+            DEV=$(basename "$blk")
+            SIZE=$(cat "$blk/size" 2>/dev/null)
+            [ -z "$SIZE" ] && continue
+            SIZE_GB=$((SIZE * 512 / 1073741824))
+            DISK_NUM=$((DISK_NUM + 1))
+            DISKS="$DISKS /dev/$DEV"
+            echo "    [$DISK_NUM] /dev/$DEV  (${SIZE_GB} GB)"
+          done
+          echo "  ─────────────────────────────────────────"
+
+          TARGET_DISK=""
+          DISK_COUNT=0
+          for d in $DISKS; do
+            case "$BOOT_DEV" in
+              ${d}*)
+                echo "  ⏭️  跳过启动设备: $d"
+                continue
+                ;;
+            esac
+            DISK_COUNT=$((DISK_COUNT + 1))
+            TARGET_DISK="$d"
+          done
+
+          if [ "$DISK_COUNT" -eq 0 ]; then
+            echo ""
+            echo "  ❌ 未找到可用目标磁盘 (所有磁盘均为启动设备?)"
+            echo "  💡 进入调试 shell 手动操作..."
+            exec /bin/busybox sh
+          fi
+
+          if [ "$DISK_COUNT" -gt 1 ]; then
+            echo ""
+            echo "  ⚠️  检测到多个候选磁盘，默认选择第一个: $TARGET_DISK"
+            echo "  💡 如需手动选择，请在5秒内按任意键进入 shell..."
+            OLD_IFS="$IFS"
+            IFS=""
+            read -t 5 -n 1 KEYPRESS 2>/dev/null
+            IFS="$OLD_IFS"
+            if [ -n "$KEYPRESS" ]; then
+              echo ""
+              echo "  💡 进入手动模式..."
+              echo "  可用命令: dd if=$FIRMWARE_PATH of=/dev/XXX bs=4M status=progress conv=fsync"
+              exec /bin/busybox sh
+            fi
+          fi
+
+          echo ""
+          echo "  ╔══════════════════════════════════════════╗"
+          echo "  ║  目标磁盘: $TARGET_DISK"
+          echo "  ║  固件来源: $BOOT_DEV"
+          echo "  ╚══════════════════════════════════════════╝"
+          echo ""
+          echo "  ⏳ 5秒后开始自动安装..."
+          echo "  💡 按 Ctrl+C 或任意键取消自动安装"
+          echo ""
+
+          for i in 5 4 3 2 1; do
+            echo -n "  ... $i  "
+            OLD_IFS="$IFS"; IFS=""
+            read -t 1 -n 1 KEY 2>/dev/null
+            IFS="$OLD_IFS"
+            if [ -n "$KEY" ]; then
+              echo ""
+              echo "  ⚠️  自动安装已取消，进入手动模式..."
+              exec /bin/busybox sh
+            fi
+            echo ""
+          done
+
+          echo ""
+          echo "  ╔══════════════════════════════════════════╗"
+          echo "  ║  📦 正在写入固件...                     ║"
+          echo "  ║  请勿关闭电源或移除设备!               ║"
+          echo "  ╚══════════════════════════════════════════╝"
+          echo ""
+
+          FIRMWARE_SIZE=$(ls -l "$FIRMWARE_PATH" 2>/dev/null | awk "{print \$4}")
+          echo "  固件: $FIRMWARE_PATH ($((FIRMWARE_SIZE / 1048576)) MB)"
+          echo "  目标: $TARGET_DISK"
+          echo ""
+
+          if /bin/busybox dd if="$FIRMWARE_PATH" of="$TARGET_DISK" bs=4M conv=fsync 2>&1; then
+            echo ""
+            echo "  ╔══════════════════════════════════════════╗"
+            echo "  ║  ✅ 安装成功!                           ║"
+            echo "  ╚══════════════════════════════════════════╝"
+            echo ""
+          else
+            echo ""
+            echo "  ❌ 写入过程出错!"
+            echo "  💡 进入调试 shell..."
+            exec /bin/busybox sh
+          fi
+
+          sync
+          echo "  💾 数据已同步到磁盘"
+
+          echo ""
+          echo "  ╔══════════════════════════════════════════╗"
+          echo "  ║  🎉 ImmortalWrt 安装完成!               ║"
+          echo "  ║                                          ║"
+          echo "  ║  请按以下步骤操作:                      ║"
+          echo "  ║  1. 移除 USB 安装盘                     ║"
+          echo "  ║  2. 系统将在 15 秒后自动关机            ║"
+          echo "  ║  3. 重新开机即可进入 ImmortalWrt        ║"
+          echo "  ╚══════════════════════════════════════════╝"
+          echo ""
+
+          sleep 15
+          echo "  🔌 正在关机..."
+          sync
+          /bin/busybox poweroff -f 2>/dev/null || /bin/busybox reboot -f 2>/dev/null || {
+            echo "  ⚠️  无法自动关机，请手动断电"
+            while true; do sleep 9999; done
+          }
+          '
+          INITSCRIPT
+
+          chmod +x initramfs_dir/init
+
+          echo ""
+          echo "📦 打包 initramfs..."
+          cd initramfs_dir
+          find . -print0 | cpio --null -o -H newc 2>/dev/null | gzip -9 > ../initramfs.gz
+          cd ..
+          echo "  initramfs 大小: $(ls -lh initramfs.gz | awk '{print $5}')"
+
+          # 构建 ISO 目录结构
+          echo ""
+          echo "💿 构建 ISO 文件系统..."
+
+          rm -rf iso_root
+          mkdir -p iso_root/boot/grub
+          mkdir -p iso_root/isolinux
+
+          cp vmlinuz iso_root/boot/vmlinuz
+          cp initramfs.gz iso_root/boot/initramfs.gz
+          cp firmware.img iso_root/firmware.img
+
+          # ISOLINUX
+          cp /usr/lib/ISOLINUX/isolinux.bin iso_root/isolinux/
+          cp /usr/lib/syslinux/modules/bios/ldlinux.c32 iso_root/isolinux/ 2>/dev/null || true
+          cp /usr/lib/syslinux/modules/bios/libcom32.c32 iso_root/isolinux/ 2>/dev/null || true
+          cp /usr/lib/syslinux/modules/bios/libutil.c32 iso_root/isolinux/ 2>/dev/null || true
+          cp /usr/lib/syslinux/modules/bios/menu.c32 iso_root/isolinux/ 2>/dev/null || true
+          cp /usr/lib/syslinux/modules/bios/vesamenu.c32 iso_root/isolinux/ 2>/dev/null || true
+
+          cat > iso_root/isolinux/isolinux.cfg << 'ISOCFG'
+          DEFAULT auto
+          PROMPT 0
+          TIMEOUT 50
+          UI menu.c32
+          MENU TITLE ImmortalWrt Auto-Installer
+
+          LABEL auto
+            MENU LABEL ^1 自动安装 ImmortalWrt (无人值守)
+            MENU DEFAULT
+            KERNEL /boot/vmlinuz
+            INITRD /boot/initramfs.gz
+            APPEND console=tty0 console=ttyS0,115200n8 quiet
+
+          LABEL manual
+            MENU LABEL ^2 手动模式 (进入 Shell)
+            KERNEL /boot/vmlinuz
+            INITRD /boot/initramfs.gz
+            APPEND console=tty0 console=ttyS0,115200n8 manual
+
+          LABEL debug
+            MENU LABEL ^3 调试模式 (详细输出)
+            KERNEL /boot/vmlinuz
+            INITRD /boot/initramfs.gz
+            APPEND console=tty0 console=ttyS0,115200n8 debug verbose
+          ISOCFG
+
+          # GRUB2
+          cat > iso_root/boot/grub/grub.cfg << 'GRUBCFG'
+          set default=0
+          set timeout=5
+          menuentry "ImmortalWrt 自动安装 (无人值守)" {
+            linux /boot/vmlinuz console=tty0 console=ttyS0,115200n8 quiet
+            initrd /boot/initramfs.gz
+          }
+          menuentry "手动模式 (进入 Shell)" {
+            linux /boot/vmlinuz console=tty0 console=ttyS0,115200n8 manual
+            initrd /boot/initramfs.gz
+          }
+          GRUBCFG
+
+          # UEFI 引导镜像
+          echo "  构建 GRUB UEFI 引导镜像..."
+          dd if=/dev/zero of=efi.img bs=1M count=10 2>/dev/null
+          mkfs.vfat -F12 efi.img >/dev/null 2>&1
+          mmd -i efi.img EFI EFI/BOOT 2>/dev/null || true
+          mcopy -i efi.img /usr/lib/grub/x86_64-efi/grubx64.efi ::EFI/BOOT/BOOTX64.EFI 2>/dev/null || true
+          mmd -i efi.img boot 2>/dev/null || true
+          mmd -i efi.img boot/grub 2>/dev/null || true
+          mcopy -i efi.img iso_root/boot/vmlinuz ::boot/vmlinuz 2>/dev/null || true
+          mcopy -i efi.img iso_root/boot/initramfs.gz ::boot/initramfs.gz 2>/dev/null || true
+          mcopy -i efi.img firmware.img ::firmware.img 2>/dev/null || true
+          mcopy -i efi.img iso_root/boot/grub/grub.cfg ::boot/grub/grub.cfg 2>/dev/null || true
+
+          # 构建 ISO
+          echo ""
+          echo "🔨 构建 ISO 镜像..."
+
+          xorriso -as mkisofs \
+            -o immortalwrt-x86-64-daede-autoinstall.iso \
+            -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
+            -b isolinux/isolinux.bin \
+            -c isolinux/boot.cat \
+            -no-emul-boot \
+            -boot-load-size 4 \
+            -boot-info-table \
+            -eltorito-alt-boot \
+            -e efi.img \
+            -no-emul-boot \
+            -isohybrid-gpt-basdat \
+            -iso-level 3 \
+            -full-iso9660-filenames \
+            -R -J -joliet-long \
+            -V "ImmortalWrt_AutoInstall" \
+            iso_root/
+
+          echo ""
+          echo "✅ ISO 构建完成!"
+
+          # 生成校验文件
+          sha256sum immortalwrt-x86-64-daede-autoinstall.iso > immortalwrt-x86-64-daede-autoinstall.iso.sha256
+
+          # 压缩原始固件供单独下载
+          echo ""
+          echo "📦 压缩原始固件以供单独下载..."
+          gzip -k firmware.img
+          mv firmware.img.gz immortalwrt-x86-64-daede.img.gz
           sha256sum immortalwrt-x86-64-daede.img.gz > immortalwrt-x86-64-daede.img.gz.sha256
 
-          echo "📊 最终固件："
-          ls -lh immortalwrt-x86-64-daede.img.gz
+          echo ""
+          echo "=========================================="
+          echo "  最终产物:"
+          echo "=========================================="
+          ls -lh immortalwrt-x86-64-daede-autoinstall.iso immortalwrt-x86-64-daede.img.gz
 
-      - name: 上传固件
-        uses: actions/upload-artifact@v4
+      - name: 创建 Release 并上传文件
+        uses: softprops/action-gh-release@v2
         with:
-          name: ImmortalWrt-x86-64-Daede
-          path: |
+          tag_name: v${{ github.run_number }}-${{ github.run_attempt }}
+          name: ImmortalWrt-Daede ${{ github.run_number }}.${{ github.run_attempt }}
+          body: |
+            ### ImmortalWrt 24.10.6 x86-64 + Daede
+
+            本次自动构建完成于 ${{ github.event.repository.updated_at }}。
+
+            **包含文件：**
+            - `immortalwrt-x86-64-daede.img.gz` 固件镜像（可直接用 `dd` 写入磁盘）
+            - `immortalwrt-x86-64-daede-autoinstall.iso` 无人值守安装 ISO（支持 BIOS/UEFI 双启动）
+
+            **ISO 使用方法：**
+            1. 将 ISO 写入 USB：`sudo dd if=immortalwrt-x86-64-daede-autoinstall.iso of=/dev/sdX bs=4M conv=fsync`
+            2. 从 USB 启动目标机器
+            3. 安装程序将自动选择非启动磁盘写入固件
+            4. 完成后自动关机，移除 USB 重启即可
+
+            **固件压缩包使用方法：**
+            - 下载 `immortalwrt-x86-64-daede.img.gz`
+            - 解压后直接写入目标磁盘：`gunzip -c immortalwrt-x86-64-daede.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`
+          files: |
             build/immortalwrt-x86-64-daede.img.gz
             build/immortalwrt-x86-64-daede.img.gz.sha256
-          retention-days: 30
+            build/immortalwrt-x86-64-daede-autoinstall.iso
+            build/immortalwrt-x86-64-daede-autoinstall.iso.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
