@@ -520,6 +520,7 @@ jobs:
           echo "🔨 构建 ISO 镜像..."
           dd if=/dev/zero of=iso_root/efi.img bs=1M count=4
           mkfs.vfat iso_root/efi.img
+          cp firmware.img iso_root/
 
           xorriso -as mkisofs \
             -o immortalwrt-x86-64-daede-autoinstall.iso \
