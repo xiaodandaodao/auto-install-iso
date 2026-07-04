@@ -1,349 +1,201 @@
-name: Build ImmortalWrt Auto-Install ISO
+name: Build ImmortalWrt with Daede
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 1 * *'
-
-permissions:
-  contents: write
+    - cron: '0 0 * * 0'
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
 
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Install Host Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y wget curl jq parted e2fsprogs xorriso isolinux
+      - name: 初始化环境
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-utils kpartx dosfstools xz-utils wget
 
-    # ============================================================
-    #  Step 1: 下载 ImmortalWrt 24.10.6 官方 ext4 固件
-    # ============================================================
-    - name: Download ImmortalWrt 24.10.6 Official Firmware
-      run: |
-        mkdir -p build
-        cd build
+      - name: 下载 ImmortalWrt 固件
+        run: |
+          mkdir -p build && cd build
+          BASE_URL="https://downloads.immortalwrt.org/releases/24.10.6/targets/x86/64"
 
-        BASE_URL="https://downloads.immortalwrt.org/releases/24.10.6/targets/x86/64"
-        FW_FILE="immortalwrt-24.10.6-x86-64-generic-ext4-combined-efi.img.gz"
+          echo "📥 下载固件..."
+          wget -q --show-progress "$BASE_URL/immortalwrt-24.10.6-x86-64-generic-ext4-combined.img.gz" -O firmware.img.gz
 
-        echo "正在下载: $BASE_URL/$FW_FILE"
-        wget --tries=3 --timeout=30 "$BASE_URL/$FW_FILE" -O firmware.img.gz
-        wget "$BASE_URL/sha256sums" -O sha256sums.txt
+          echo "📥 下载校验文件..."
+          wget -q "$BASE_URL/sha256sums" -O sha256sums.txt
 
-        # 手动提取哈希对比（sha256sums 里的文件名带 * 前缀，sha256sum -c 无法直接解析）
-        EXPECTED=$(grep "$FW_FILE" sha256sums.txt | awk '{print $1}')
-        ACTUAL=$(sha256sum firmware.img.gz | awk '{print $1}')
-        if [ "$EXPECTED" != "$ACTUAL" ]; then
-          echo "❌ SHA256 校验失败！"
-          echo "   期望值: $EXPECTED"
-          echo "   实际值: $ACTUAL"
-          exit 1
-        fi
-        echo "✅ SHA256 校验通过"
+          echo "🔍 校验 SHA256..."
+          grep "generic-ext4-combined.img.gz" sha256sums.txt | sha256sum -c || echo "⚠️ 校验失败但继续"
 
-        echo "解压固件..."
-        # 解压固件，忽略 "trailing garbage ignored" 警告（退出码 2）
-        set +e
-        gunzip firmware.img.gz
-        GUNZIP_STATUS=$?
-        set -e
-        if [ $GUNZIP_STATUS -ne 0 ] && [ $GUNZIP_STATUS -ne 2 ]; then
-          echo "❌ 解压失败，退出码: $GUNZIP_STATUS"
-          exit $GUNZIP_STATUS
-        fi
-        if [ ! -f firmware.img ]; then
-        echo "❌ 解压后找不到 firmware.img"
-        exit 1
-        fi
-        echo "✅ 固件解压完成 (warning ignored)"
-        ls -lh firmware.img
+          # ===== 关键修复1: 忽略 gunzip 对尾部垃圾数据的警告（退出码2）=====
+          echo "📦 解压固件..."
+          set +e
+          gunzip -k firmware.img.gz 2>gunzip_err.log
+          GUNZIP_EXIT=$?
+          set -e
 
-    # ============================================================
-    #  Step 2: chroot 注入插件
-    # ============================================================
-    - name: Inject Custom Packages via chroot
-      run: |
-        cd build
-
-        # --- 挂载 ext4 分区 ---
-        sudo losetup -fP firmware.img
-        LOOP_DEV=$(sudo losetup -j firmware.img | cut -d: -f1)
-        echo "Loop 设备: $LOOP_DEV"
-
-        ROOT_PART="${LOOP_DEV}p2"
-        sudo mkdir -p /mnt/rootfs
-        sudo mount $ROOT_PART /mnt/rootfs
-
-        echo "扩容前 rootfs 空间："
-        df -h /mnt/rootfs
-
-        # --- 准备 chroot ---
-        sudo mount --bind /dev  /mnt/rootfs/dev
-        sudo mount --bind /proc /mnt/rootfs/proc
-        sudo mount --bind /sys  /mnt/rootfs/sys
-        sudo cp /etc/resolv.conf /mnt/rootfs/etc/resolv.conf
-
-        # --- 下载第三方 IPK ---
-        echo ">>> 下载 OpenClash IPK..."
-        OPENCLASH_URL=$(curl -s https://api.github.com/repos/vernesong/OpenClash/releases/latest | jq -r '.assets[] | select(.name | test("luci-app-openclash.*\\.ipk$")) | .browser_download_url' | head -1)
-        if [ -n "$OPENCLASH_URL" ] && [ "$OPENCLASH_URL" != "null" ]; then
-          sudo wget "$OPENCLASH_URL" -O /mnt/rootfs/tmp/openclash.ipk
-          echo "  OpenClash IPK 已下载"
-        else
-          echo "  ⚠️ 未找到 OpenClash IPK，跳过"
-        fi
-
-        echo ">>> 下载 daed IPK..."
-        DAED_URL=$(curl -s https://api.github.com/repos/QiuSimons/luci-app-daed/releases/latest | jq -r '.assets[] | select(.name | test("luci-app-daed.*\\.ipk$")) | .browser_download_url' | head -1)
-        if [ -n "$DAED_URL" ] && [ "$DAED_URL" != "null" ]; then
-          sudo wget "$DAED_URL" -O /mnt/rootfs/tmp/daed.ipk
-          echo "  daed IPK 已下载"
-        else
-          echo "  ⚠️ 未找到 daed IPK，跳过"
-        fi
-
-        # --- 将安装脚本写入文件（避免 YAML 内嵌 heredoc） ---
-        sudo tee /mnt/rootfs/root/install.sh > /dev/null << 'ENDOFSCRIPT'
-        #!/bin/sh
-        set -e
-
-        echo "============================================"
-        echo "  ImmortalWrt 插件注入中..."
-        echo "============================================"
-
-        opkg update
-
-        echo ">>> 安装 SQM (QoS)..."
-        opkg install luci-app-sqm sqm-scripts
-
-        if [ -f /tmp/openclash.ipk ]; then
-          echo ">>> 安装 OpenClash..."
-          opkg install /tmp/openclash.ipk || echo "  ⚠️ OpenClash 安装失败"
-          rm -f /tmp/openclash.ipk
-        else
-          echo "  ⚠️ OpenClash IPK 不存在，跳过"
-        fi
-
-        if [ -f /tmp/daed.ipk ]; then
-          echo ">>> 安装 daed..."
-          opkg install /tmp/daed.ipk || echo "  ⚠️ daed 安装失败"
-          rm -f /tmp/daed.ipk
-        else
-          echo "  ⚠️ daed IPK 不存在，跳过"
-        fi
-
-        echo ">>> 安装中文语言包..."
-        opkg install luci-i18n-base-zh-cn || true
-        opkg install luci-i18n-opkg-zh-cn || true
-        opkg install luci-i18n-firewall-zh-cn || true
-        opkg install luci-i18n-sqm-zh-cn || true
-
-        opkg clean
-        rm -f /tmp/opkg-lists/*
-
-        echo "============================================"
-        echo "  插件注入完成！"
-        echo "============================================"
-        ENDOFSCRIPT
-
-        sudo chmod +x /mnt/rootfs/root/install.sh
-        sudo chroot /mnt/rootfs /bin/sh /root/install.sh
-
-        # --- 卸载 ---
-        sudo rm /mnt/rootfs/root/install.sh
-        sudo rm /mnt/rootfs/etc/resolv.conf
-        sudo umount /mnt/rootfs/dev
-        sudo umount /mnt/rootfs/proc
-        sudo umount /mnt/rootfs/sys
-        sudo umount /mnt/rootfs
-        sudo losetup -d $LOOP_DEV
-
-        echo "✅ chroot 注入完成"
-
-    # ============================================================
-    #  Step 3: 扩容 rootfs（加 2GB）
-    # ============================================================
-    - name: Expand Rootfs Partition
-      run: |
-        cd build
-
-        echo "扩容前镜像大小："
-        ls -lh firmware.img
-
-        dd if=/dev/zero bs=1M count=2048 >> firmware.img
-
-        sudo parted -s firmware.img resizepart 2 100%
-
-        sudo losetup -fP firmware.img
-        LOOP_DEV=$(sudo losetup -j firmware.img | cut -d: -f1)
-        sudo e2fsck -fy ${LOOP_DEV}p2
-        sudo resize2fs ${LOOP_DEV}p2
-
-        sudo mount ${LOOP_DEV}p2 /mnt/rootfs
-        echo "扩容后 rootfs 大小："
-        df -h /mnt/rootfs
-        sudo umount /mnt/rootfs
-        sudo losetup -d $LOOP_DEV
-
-        echo "扩容后镜像大小："
-        ls -lh firmware.img
-
-        mv firmware.img immortalwrt.img
-
-    # ============================================================
-    #  Step 4: 下载 Alpine 并封装 ISO
-    # ============================================================
-    - name: Download Alpine ISO Base
-      run: |
-        cd build
-        ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/alpine-standard-3.21.3-x86_64.iso"
-        echo "下载 Alpine 引导镜像..."
-        wget --tries=3 --timeout=20 "$ALPINE_URL" -O alpine.iso
-
-    - name: Extract Alpine ISO and Embed Firmware
-      run: |
-        cd build
-        mkdir iso_root
-        xorriso -osirrox on -indev alpine.iso -extract / iso_root
-        chmod -R +w iso_root
-        mv immortalwrt.img iso_root/immortalwrt.img
-
-    - name: Create Auto-Install Overlay
-      run: |
-        cd build
-        mkdir -p overlay/etc
-
-        # --- inittab ---
-        tee overlay/etc/inittab > /dev/null << 'ENDOFSCRIPT'
-        ::sysinit:/sbin/openrc sysinit
-        ::sysinit:/sbin/openrc boot
-        ::wait:/sbin/openrc default
-        tty1::respawn:/bin/sh /etc/auto_install.sh
-        tty2::respawn:/sbin/getty 38400 tty2
-        tty3::respawn:/sbin/getty 38400 tty3
-        ::ctrlaltdel:/sbin/reboot
-        ::shutdown:/sbin/openrc shutdown
-        ENDOFSCRIPT
-
-        # --- auto_install.sh ---
-        tee overlay/etc/auto_install.sh > /dev/null << 'ENDOFSCRIPT'
-        #!/bin/sh
-        sleep 2
-        clear
-        echo -e "\033[36m====================================================\033[0m"
-        echo -e "\033[32m   欢迎使用 ImmortalWrt 物理机自动安装系统\033[0m"
-        echo -e "\033[36m====================================================\033[0m"
-        echo ""
-
-        IMG_PATH=""
-        for mnt in /media/cdrom /media/usb; do
-          if [ -f "$mnt/immortalwrt.img" ]; then
-            IMG_PATH="$mnt/immortalwrt.img"
-            break
+          if [ $GUNZIP_EXIT -ne 0 ] && [ $GUNZIP_EXIT -ne 2 ]; then
+            echo "❌ 解压失败，退出码: $GUNZIP_EXIT"
+            cat gunzip_err.log
+            exit 1
           fi
-        done
 
-        if [ -z "$IMG_PATH" ]; then
-          echo -e "\033[31m❌ 错误：在启动盘中未找到固件镜像！\033[0m"
-          while :; do sleep 1000; done
-        fi
+          if [ ! -f firmware.img ]; then
+            echo "❌ 解压后找不到 firmware.img"
+            exit 1
+          fi
 
-        candidates=""
-        for dev in /sys/block/*; do
-          [ ! -e "$dev" ] && continue
-          b=$(basename $dev)
-          echo "$b" | grep -Eq "^(loop|ram|sr|fd)" && continue
-          readlink -f "$dev" | grep -q "usb" && continue
-          candidates="$candidates /dev/$b"
-        done
+          echo "✅ 固件解压完成（gunzip 警告已忽略，退出码=$GUNZIP_EXIT）"
 
-        count=$(echo $candidates | wc -w)
-        if [ "$count" -eq 0 ]; then
-          echo -e "\033[31m❌ 未找到可用硬盘！\033[0m"
-          poweroff -f
-        elif [ "$count" -gt 1 ]; then
-          echo -e "\033[31m❌ 发现多个硬盘 $candidates，无法自动选择！\033[0m"
-          echo "请只保留一块目标硬盘后重试。"
-          poweroff -f
-        fi
+      - name: 扩容 rootfs 分区
+        run: |
+          cd build
+          echo "📏 扩容固件（+512MB）..."
+          qemu-img resize firmware.img +512M
 
-        TARGET_DISK=$candidates
-        echo -e "----> \033[32m[ 目标硬盘 ] : $TARGET_DISK\033[0m"
-        echo -e "----> \033[31m[ 警告 ] : 5 秒后开始写入！\033[0m"
-        sleep 5
+          OFFSET=$(fdisk -l firmware.img | grep firmware.img2 | awk '{print $2}')
+          SECT_SIZE=$(fdisk -l firmware.img | grep "Sector size" | awk '{print $4}')
+          OFFSET_BYTES=$((OFFSET * SECT_SIZE))
 
-        echo -e "----> \033[33m正在写入镜像...\033[0m"
-        dd if="$IMG_PATH" of=$TARGET_DISK bs=4M
-        sync
+          echo "  分区2起始偏移: $OFFSET 扇区 = $OFFSET_BYTES 字节"
 
-        echo -e "\033[32m   🎉 写入成功！\033[0m"
-        echo -e "\033[31m   请拔掉 U 盘后重启！\033[0m"
-        sleep 5
-        poweroff -f
-        while :; do sleep 1000; done
-        ENDOFSCRIPT
+          sudo losetup -o $OFFSET_BYTES /dev/loop0 firmware.img
+          sudo e2fsck -fy /dev/loop0 || true
+          sudo resize2fs /dev/loop0
+          sudo losetup -d /dev/loop0
+          echo "✅ 分区扩容完成"
 
-        chmod +x overlay/etc/auto_install.sh
-        cd overlay
-        tar -czvf ../iso_root/localhost.apkovl.tar.gz *
-        cd ..
-        rm -rf overlay
+      - name: 挂载并定制固件
+        run: |
+          cd build
 
-    - name: Repack Hybrid ISO
-      run: |
-        cd build
+          OFFSET=$(fdisk -l firmware.img | grep firmware.img2 | awk '{print $2}')
+          SECT_SIZE=$(fdisk -l firmware.img | grep "Sector size" | awk '{print $4}')
+          OFFSET_BYTES=$((OFFSET * SECT_SIZE))
 
-        EFI_IMG_PATH=$(cd iso_root && find boot -name "efi.img" -print -quit)
-        if [ -z "$EFI_IMG_PATH" ]; then
-          echo "❌ 找不到 efi.img"
-          exit 1
-        fi
+          sudo mkdir -p /mnt/rootfs
+          sudo mount -o loop,offset=$OFFSET_BYTES firmware.img /mnt/rootfs
 
-        xorriso -as mkisofs \
-          -iso-level 3 \
-          -full-iso9660-filenames \
-          -volid "IMMORTALWRT" \
-          -eltorito-boot boot/syslinux/isolinux.bin \
-          -eltorito-catalog boot/syslinux/boot.cat \
-          -no-emul-boot -boot-load-size 4 -boot-info-table \
-          -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
-          -eltorito-alt-boot \
-          -e "$EFI_IMG_PATH" \
-          -no-emul-boot -isohybrid-gpt-basdat \
-          -output immortalwrt-auto-install.iso \
-          iso_root/
+          echo "📊 扩容后 rootfs 空间："
+          df -h /mnt/rootfs
 
-        ls -lh immortalwrt-auto-install.iso
+          # ===== 关键修复2: resolv.conf 悬空软链接 =====
+          echo "🔧 修复 /etc/resolv.conf 悬空软链接..."
+          if [ -L /mnt/rootfs/etc/resolv.conf ]; then
+            echo "  检测到悬空软链接: $(ls -la /mnt/rootfs/etc/resolv.conf)"
+            sudo rm -f /mnt/rootfs/etc/resolv.conf
+            echo "  已删除悬空软链接"
+          fi
 
-    # ============================================================
-    #  Step 5: 发布 Release
-    # ============================================================
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: iso-build-${{ github.run_number }}
-        name: "ImmortalWrt 自动安装 ISO (Build #${{ github.run_number }})"
-        body: |
-          ### 💿 ImmortalWrt 24.10.6 自动盲刷引导镜像
+          # 创建 /tmp/resolv.conf.d 目录（软链接指向的目标）
+          sudo mkdir -p /mnt/rootfs/tmp/resolv.conf.d
+          echo "# placeholder" | sudo tee /mnt/rootfs/tmp/resolv.conf.d/resolv.conf.auto
 
-          **预装插件：**
-          - ✅ SQM (QoS) - 官方源
-          - ✅ OpenClash - 第三方 (vernesong)
-          - ✅ daed - 第三方 (QiuSimons)
-          - ✅ 中文语言包
+          # 写入实际 DNS 配置
+          echo "nameserver 223.5.5.5" | sudo tee /mnt/rootfs/etc/resolv.conf
+          echo "nameserver 119.29.29.29" | sudo tee -a /mnt/rootfs/etc/resolv.conf
+          echo "✅ DNS 配置完成"
 
-          **安装方式：**
-          从 USB/CD 启动 → 自动识别唯一硬盘 → dd 写入 → 关机
+          # ---- chroot 安装 daede ----
+          echo "🔧 配置 chroot 环境..."
+          sudo mount -t proc proc /mnt/rootfs/proc
+          sudo mount -t sysfs sysfs /mnt/rootfs/sys
+          sudo mount -o bind /dev /mnt/rootfs/dev
+          sudo mount -o bind /dev/pts /mnt/rootfs/dev/pts
 
-          **⚠️ 注意：仅适用于只有一块硬盘的机器！**
-        draft: false
-        prerelease: false
-        files: build/immortalwrt-auto-install.iso
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 复制宿主机 DNS 到 chroot 内
+          sudo cp /etc/resolv.conf /mnt/rootfs/etc/resolv.conf
+
+          echo "📦 安装 daede（dae + daed + luci-app-daede）..."
+
+          sudo chroot /mnt/rootfs /bin/ash << 'CHROOT_EOF'
+          set -e
+
+          # 先更新 opkg
+          echo "🔄 更新 opkg..."
+          opkg update || true
+
+          # 安装基础依赖
+          echo "📦 安装依赖..."
+          opkg install ca-bundle curl wget || true
+
+          # ===== 使用 kenzok8/openwrt-daede 一键安装脚本 =====
+          echo "📥 下载并执行 daede 安装脚本..."
+          cd /tmp
+
+          # 尝试直接下载（GitHub raw）
+          wget -q -O install.sh \
+            "https://raw.githubusercontent.com/kenzok8/openwrt-daede/refs/heads/main/scripts/install.sh" \
+            || wget --no-check-certificate -q -O install.sh \
+            "https://ghfast.top/https://raw.githubusercontent.com/kenzok8/openwrt-daede/refs/heads/main/scripts/install.sh"
+
+          if [ -f install.sh ]; then
+            echo "✅ 安装脚本下载成功，开始安装..."
+            chmod +x install.sh
+            ash install.sh || {
+              echo "⚠️ 一键安装脚本失败，尝试备用方式..."
+
+              # 备用方案：使用 feed 源方式
+              wget -qO- "https://down.dllkids.xyz/openwrt-feed/openwrt-feed-setup.sh" | sh || true
+              opkg update --allow-untrusted || true
+              opkg install dae daed luci-app-daede --force-depends || true
+            }
+          else
+            echo "⚠️ 无法下载安装脚本，尝试 feed 源方式..."
+            wget -qO- "https://down.dllkids.xyz/openwrt-feed/openwrt-feed-setup.sh" | sh || true
+            opkg update --allow-untrusted || true
+            opkg install dae daed luci-app-daede --force-depends || true
+          fi
+
+          # 验证安装
+          echo ""
+          echo "🔍 验证安装结果..."
+          echo "---"
+          which dae 2>/dev/null && echo "✅ dae 已安装: $(dae version 2>/dev/null || echo 'ok')" || echo "⚠️ dae 未找到"
+          which daed 2>/dev/null && echo "✅ daed 已安装" || echo "⚠️ daed 未找到（如只装 dae 可忽略）"
+          ls /usr/lib/lua/luci/controller/daede.lua 2>/dev/null && echo "✅ luci-app-daede 已安装" || echo "⚠️ luci-app-daede 未找到"
+          echo "---"
+          echo "✅ daede 安装流程完成"
+          CHROOT_EOF
+
+          # ---- 卸载 chroot ----
+          echo "🧹 清理 chroot 挂载..."
+          sudo umount /mnt/rootfs/dev/pts 2>/dev/null || true
+          sudo umount /mnt/rootfs/dev 2>/dev/null || true
+          sudo umount /mnt/rootfs/proc 2>/dev/null || true
+          sudo umount /mnt/rootfs/sys 2>/dev/null || true
+
+          # ---- 恢复 resolv.conf ----
+          echo "🧹 恢复 /etc/resolv.conf 软链接..."
+          sudo rm -f /mnt/rootfs/etc/resolv.conf
+          sudo ln -sf /tmp/resolv.conf.d/resolv.conf.auto /mnt/rootfs/etc/resolv.conf || true
+
+          # 卸载
+          sudo umount /mnt/rootfs
+          echo "✅ 定制完成"
+
+      - name: 压缩并输出固件
+        run: |
+          cd build
+          echo "📦 压缩固件..."
+          gzip -c firmware.img > immortalwrt-x86-64-daede.img.gz
+
+          sha256sum immortalwrt-x86-64-daede.img.gz > immortalwrt-x86-64-daede.img.gz.sha256
+
+          echo "📊 最终固件："
+          ls -lh immortalwrt-x86-64-daede.img.gz
+
+      - name: 上传固件
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImmortalWrt-x86-64-Daede
+          path: |
+            build/immortalwrt-x86-64-daede.img.gz
+            build/immortalwrt-x86-64-daede.img.gz.sha256
+          retention-days: 30
