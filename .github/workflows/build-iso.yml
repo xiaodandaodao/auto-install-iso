@@ -26,28 +26,59 @@ jobs:
           tar -I zstd -xf immortalwrt-imagebuilder-24.10.6-x86-64.Linux-x86_64.tar.zst
           mv immortalwrt-imagebuilder-24.10.6-x86-64.Linux-x86_64 imagebuilder
 
-      - name: Configure Image Builder (Feeds, Signature, PartSize)
+      - name: Configure Image Builder (Feeds, Signature, PartSize, and Dae Bypass)
         run: |
           cd imagebuilder
-          # 1. 屏蔽签名验证，允许拉取自定义第三方包
+          # 1. 屏蔽签名验证
           sed -i 's/option check_signature/# option check_signature/g' repositories.conf
           sed -i 's/option check_signature/# option check_signature/g' etc/opkg.conf || true
           
-          # 2. 【核心修正】：替换为此前 Chroot 方案中物理验证成功的、绝对兼容的第三方源 URL
+          # 2. 注入第三方源
           echo "src/gz dllkids_packages https://down.dllkids.xyz/openwrt-feed/x86_64" >> repositories.conf
           
           # 3. 锁定 Rootfs 分区为 512MB
           echo "CONFIG_TARGET_ROOTFS_PARTSIZE=512" >> .config
           sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=[0-9]*/CONFIG_TARGET_ROOTFS_PARTSIZE=512/g' .config 2>/dev/null || true
 
+          # ======= 👇 以下为新增的解耦避坑逻辑 👇 =======
+          # 创建 Image Builder 释放外置文件的目录结构
+          mkdir -p files/root/pkgs
+          mkdir -p files/etc/uci-defaults
+
+          # 自动从源中解析并拉取 dae/daed/luci 离线安装包
+          FEED_URL="https://down.dllkids.xyz/openwrt-feed/x86_64"
+          curl -s "${FEED_URL}/Packages" > temp_packages
+          for pkg in dae daed luci-app-daede; do
+            IPK_PATH=$(grep -A 10 "Package: ${pkg}$" temp_packages | grep "Filename:" | awk '{print $2}')
+            if [ ! -z "$IPK_PATH" ]; then
+              wget -P files/root/pkgs "${FEED_URL}/${IPK_PATH}"
+            fi
+          done
+          rm temp_packages
+
+          # 写入无人值守开机自启安装脚本 (物理机真实环境运行，绝不报错)
+          cat << 'EOF' > files/etc/uci-defaults/99-install-dae
+          #!/bin/sh
+          if [ -d /root/pkgs ]; then
+              logger -t "INSTALLER" "Starting offline installation for DAE/DAED..."
+              opkg install /root/pkgs/*.ipk --force-depends
+              rm -rf /root/pkgs
+          fi
+          exit 0
+          EOF
+          chmod +x files/etc/uci-defaults/99-install-dae
+          
       - name: Build Firmware Image
         run: |
           cd imagebuilder
-          # 这里的 PACKAGES 已经过优化，全面对齐兼容层，并执行 Dnsmasq 彻底清场
+          # 1. PACKAGES 剔除了 dae 核心包，顺便修复了之前 dnsmasq-full 重复声明的小语法隐患
+          # 2. 显式补全了 dae 运行所需的底层核心依赖（kmod-nft-tproxy, ip-full）
+          # 3. 末尾追加 FILES=files 将上一步下载的包和脚本打包进 ISO
           make image PROFILE=generic \
-            PACKAGES="luci-app-openclash dae daed luci-app-daede sqm-scripts luci-app-sqm -dnsmasq -dnsmasq-dhcpv6 -dnsmasq-full dnsmasq-full bash curl ca-bundle coreutils-nohup libcap-bin" \
-            CONFIG_TARGET_ROOTFS_PARTSIZE=512
-
+            PACKAGES="luci-app-openclash sqm-scripts luci-app-sqm -dnsmasq -dnsmasq-dhcpv6 dnsmasq-full bash curl ca-bundle coreutils-nohup libcap-bin kmod-nft-tproxy ip-full" \
+            CONFIG_TARGET_ROOTFS_PARTSIZE=512 \
+            FILES=files
+            
       - name: Extract Firmware and Kernel
         run: |
           IMAGE_PATH=$(ls imagebuilder/bin/targets/x86/64/*combined-efi.img.gz | head -n 1)
