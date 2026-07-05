@@ -3,6 +3,10 @@ name: Build ImmortalWrt Unattended ISO via Image Builder
 on:
   workflow_dispatch: # 支持手动触发
 
+# 核心修改点 1：必须显式声明写权限，否则 Actions 无法自动创建 Release
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -14,53 +18,40 @@ jobs:
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          # 安装 Image Builder 运行所需的宿主机工具，以及 ISO 封装、打包工具
-          sudo apt-get install -y zstd gawk gettext xz-utils xsltproc static-nss \
+          sudo apt-get install -y zstd gawk gettext xz-utils xsltproc \
             grub-pc-bin grub-efi-amd64-bin xorriso mtools libisoburn1 busybox-static cpio
 
       - name: Download and Extract Image Builder
         run: |
-          # 下载 ImmortalWrt 24.10.6 x86_64 官方镜像生成器
           wget https://downloads.immortalwrt.org/releases/24.10.6/targets/x86/64/immortalwrt-imagebuilder-24.10.6-x86-64.Linux-x86_64.tar.zst
-          # 使用 zstd 解压并重命名目录
           tar -I zstd -xf immortalwrt-imagebuilder-24.10.6-x86-64.Linux-x86_64.tar.zst
           mv immortalwrt-imagebuilder-24.10.6-x86-64.Linux-x86_64 imagebuilder
 
       - name: Configure Image Builder (Feeds, Signature, PartSize)
         run: |
           cd imagebuilder
-          
-          # 避坑点 1：关闭底包与本地的软件包签名校验，防止拉取未签名的第三方源时强制报错中断
           sed -i 's/option check_signature/# option check_signature/g' repositories.conf
           sed -i 's/option check_signature/# option check_signature/g' etc/opkg.conf || true
           
-          # 避坑点 2：注入第三方软件源（此处以常见的 dllkids 存放 dae/daed 的架构源为例）
-          # 提示：如果你的软件源 URL 有变动，可以直接修改下方两条地址
           echo "src/gz dllkids_base https://op.dllkids.xyz/packages/x86_64/base" >> repositories.conf
           echo "src/gz dllkids_luci https://op.dllkids.xyz/packages/x86_64/luci" >> repositories.conf
           
-          # 避坑点 3：强行硬编码 Rootfs 分区大小为 512MB
           echo "CONFIG_TARGET_ROOTFS_PARTSIZE=512" >> .config
           sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=[0-9]*/CONFIG_TARGET_ROOTFS_PARTSIZE=512/g' .config 2>/dev/null || true
 
       - name: Build Firmware Image
         run: |
           cd imagebuilder
-          
-          # 避坑点 4：进行 Dnsmasq 清场，剔除默认精简版和 dhcpv6 版，替换为 full 版
-          # 避坑点 5：显式补充 OpenClash 运行所需的周边核心依赖（如 bash, curl, ca-bundle, nohup 等）
           make image PROFILE=generic \
             PACKAGES="luci-app-openclash dae daed luci-app-daede sqm-scripts luci-app-sqm -dnsmasq -dnsmasq-dhcpv6 dnsmasq-full bash curl ca-bundle coreutils-nohup libcap-bin" \
             CONFIG_TARGET_ROOTFS_PARTSIZE=512
 
       - name: Extract Firmware and Kernel
         run: |
-          # 定位并解压 Image Builder 生成的完美固件（优先采用 ext4-combined-efi）
           IMAGE_PATH=$(ls imagebuilder/bin/targets/x86/64/*combined-efi.img.gz | head -n 1)
           echo "Target image found: $IMAGE_PATH"
           gunzip -c "$IMAGE_PATH" > openwrt.img
           
-          # 提取原生内核文件，用作 ISO 系统的引导载体
           if [ -f imagebuilder/bin/targets/x86/64/vmlinuz ]; then
             cp imagebuilder/bin/targets/x86/64/vmlinuz kernel.bin
           else
@@ -69,11 +60,9 @@ jobs:
 
       - name: Create Custom Initramfs (Installer)
         run: |
-          # 组装用于自动化安装的极简内存文件系统目录结构
           mkdir -p initrd_root/bin initrd_root/sbin initrd_root/etc initrd_root/dev initrd_root/proc initrd_root/sys initrd_root/mnt initrd_root/mnt_test initrd_root/iso
-          cp /bin/busybox initrd_root/bin/busybox
+          cp $(which busybox) initrd_root/bin/busybox
           
-          # 写入无人值守核心安装脚本
           cat << 'EOF' > initrd_root/init
           #!/bin/busybox sh
           /bin/busybox --install -s /bin
@@ -85,7 +74,6 @@ jobs:
           echo "      ImmortalWrt Unattended Automated Installer     "
           echo "===================================================="
           
-          # 逻辑优化：先遍历扫描所有的块设备，挂载并定位存放 openwrt.img 的 ISO 介质
           ISO_DEV=""
           for dev in /dev/sr* /dev/sd* /dev/nvme*; do
               if [ -b "$dev" ]; then
@@ -109,10 +97,8 @@ jobs:
               exec sh
           fi
           
-          # 去掉分区数字，得到安装介质本身的物理磁盘名称 (例如：/dev/sdb1 -> /dev/sdb)
           ISO_DISK=$(echo "$ISO_DEV" | sed -E 's/p?[0-9]+$//')
           
-          # 匹配目标物理磁盘：排除当前的安装盘以及回环、虚拟设备，默认对扫描到的首个固定硬盘执行写入
           TARGET_DISK=""
           for dev in /sys/block/*; do
               devname=$(basename $dev)
@@ -138,7 +124,6 @@ jobs:
           
           echo "Target disk detected: $TARGET_DISK"
           echo "Writing image to $TARGET_DISK... Please wait..."
-          # 执行物理扇区对齐写入，由于底层已通过 Image Builder 声明了 512M，分区表天然完美对齐
           dd if=/openwrt.img of=$TARGET_DISK bs=4M status=progress
           sync
           
@@ -150,7 +135,6 @@ jobs:
           
           chmod +x initrd_root/init
           
-          # 打包回 initrd.gz 格式
           cd initrd_root
           find . | cpio -H newc -o | gzip -9 > ../initrd.gz
           cd ..
@@ -162,7 +146,6 @@ jobs:
           cp initrd.gz iso_root/initrd.gz
           cp openwrt.img iso_root/openwrt.img
           
-          # 写入规范的 GRUB2 引导菜单
           cat << 'EOF' > iso_root/boot/grub/grub.cfg
           set default=0
           set timeout=1
@@ -172,12 +155,20 @@ jobs:
           }
           EOF
           
-          # 利用 grub-mkrescue 直接生成原生支持 UEFI ＋ Legacy BIOS 混合双启的混合 ISO 镜像
           grub-mkrescue -o immortalwrt-24.10.6-x86-64-unattended.iso iso_root
 
-      - name: Upload ISO Artifact
-        uses: actions/upload-artifact@v4
+      # 核心修改点 2：将产物直接以 Release 形式推送到仓库发布页
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: immortalwrt-unattended-installer
-          path: immortalwrt-24.10.6-x86-64-unattended.iso
-          if-no-files-found: error
+          tag_name: "v24.10.6-build${{ github.run_number }}"
+          name: "ImmortalWrt ISO v24.10.6 (Build #${{ github.run_number }})"
+          body: |
+            ### 🤖 自动化构建说明
+            基于 **Image Builder** 原子化方案封装的物理机无人值守双启安装镜像。
+            
+            - **固件底包**：ImmortalWrt 24.10.6 (x86_64)
+            - **根分区大小**：原生 512MB
+            - **集成插件**：OpenClash, Dae, Daed, SQM
+            - **网络依赖修补**：已强制替换为 `dnsmasq-full` 并固化组件运行核心周边链
+          files: immortalwrt-24.10.6-x86-64-unattended.iso
