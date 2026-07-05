@@ -121,48 +121,69 @@ jobs:
           sudo umount mnt
           sudo losetup -d /dev/loop0
 
+      - name: Extract Kernel Modules from Firmware Image
+        run: |
+          sudo losetup -P /dev/loop0 openwrt.img
+          sleep 1
+          mkdir -p mnt
+          sudo mount /dev/loop0p2 mnt
+          KERNEL_VERSION=$(ls mnt/lib/modules/ | head -n 1)
+          echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
+          mkdir -p initrd_modules
+          for mod in cdrom sr_mod isofs nls_base nls_iso8859-1 nls_cp437; do
+            file=$(sudo find mnt/lib/modules/$KERNEL_VERSION -name "${mod}.ko*" | head -n 1)
+            if [ -n "$file" ]; then
+              if echo "$file" | grep -q '\.ko\.gz$'; then
+                sudo zcat "$file" > initrd_modules/${mod}.ko
+              elif echo "$file" | grep -q '\.ko$'; then
+                sudo cp "$file" initrd_modules/
+              fi
+            fi
+          done
+          sudo umount mnt
+          sudo losetup -d /dev/loop0    
+          
       - name: Create Custom Initramfs (Installer)
         run: |
-          # 原有目录创建（已存在）
           mkdir -p initrd_root/bin initrd_root/sbin initrd_root/etc initrd_root/dev \
-                   initrd_root/proc initrd_root/sys initrd_root/mnt initrd_root/mnt_test initrd_root/iso
-          # 新增：创建模块目录并复制提取的模块
+                   initrd_root/proc initrd_root/sys initrd_root/mnt initrd_root/mnt_test
+          
+          # 创建模块目录并复制提取的模块（如果上一步成功提取）
           mkdir -p initrd_root/lib/modules/${KERNEL_VERSION}
-          cp initrd_modules/*.ko initrd_root/lib/modules/${KERNEL_VERSION}/
+          cp initrd_modules/*.ko initrd_root/lib/modules/${KERNEL_VERSION}/ 2>/dev/null || true
+          
           cp $(which busybox) initrd_root/bin/busybox
           
-          # 生成 init 脚本（在原有基础上插入 insmod 部分）
-          cat << 'EOF' > initrd_root/init
+          cat << 'SCRIPT_EOF' > initrd_root/init
           #!/bin/busybox sh
           /bin/busybox --install -s /bin
           mount -t proc proc /proc
           mount -t sysfs sysfs /sys
           mount -t devtmpfs devtmpfs /dev 2>/dev/null || mdev -s
-          # ==================== 新增：加载必要内核模块 ====================
+          
+          # 选择性加载模块（文件不存在则跳过，不报错）
           KVER=$(uname -r)
           MODPATH=/lib/modules/$KVER
-          insmod $MODPATH/nls_base.ko
-          insmod $MODPATH/nls_iso8859-1.ko
-          insmod $MODPATH/nls_cp437.ko
-          insmod $MODPATH/cdrom.ko
-          insmod $MODPATH/sr_mod.ko
-          insmod $MODPATH/isofs.ko
-          # ==============================================================
+          for mod in nls_base nls_iso8859-1 nls_cp437 cdrom sr_mod isofs; do
+              if [ -f "$MODPATH/$mod.ko" ]; then
+                  insmod "$MODPATH/$mod.ko" 2>/dev/null
+              fi
+          done
+          
           echo "===================================================="
           echo "      ImmortalWrt Unattended Automated Installer     "
           echo "===================================================="
           
           ISO_DEV=""
+          ISO_MOUNT=""
           for dev in /dev/sr* /dev/sd* /dev/nvme*; do
               if [ -b "$dev" ]; then
                   mkdir -p /mnt_test
                   if mount -o ro "$dev" /mnt_test 2>/dev/null; then
                       if [ -f /mnt_test/openwrt.img ]; then
                           ISO_DEV="$dev"
+                          ISO_MOUNT="/mnt_test"
                           echo "Found installation media: $ISO_DEV"
-                          echo "Copying system image to memory..."
-                          cp /mnt_test/openwrt.img /openwrt.img
-                          umount /mnt_test
                           break
                       fi
                       umount /mnt_test
@@ -170,11 +191,12 @@ jobs:
               fi
           done
           
-          if [ ! -f /openwrt.img ]; then
+          if [ -z "$ISO_DEV" ]; then
               echo "ERROR: Installation source media (openwrt.img) not found!"
               exec sh
           fi
           
+          # 计算安装介质对应的磁盘（用于排除）
           ISO_DISK=$(echo "$ISO_DEV" | sed -E 's/p?[0-9]+$//')
           
           TARGET_DISK=""
@@ -202,14 +224,16 @@ jobs:
           
           echo "Target disk detected: $TARGET_DISK"
           echo "Writing image to $TARGET_DISK... Please wait..."
-          dd if=/openwrt.img of=$TARGET_DISK bs=4M status=progress
+          
+          # 直接从 ISO 挂载点流式写入目标磁盘，无需复制到内存
+          dd if=${ISO_MOUNT}/openwrt.img of=$TARGET_DISK bs=4M
           sync
           
           echo "Success! System installation finished."
           echo "The machine will power off in 5 seconds. Please remove the USB drive."
           sleep 5
           poweroff -f
-          EOF
+          SCRIPT_EOF
           
           chmod +x initrd_root/init
           
