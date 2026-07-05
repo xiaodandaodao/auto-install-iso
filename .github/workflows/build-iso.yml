@@ -31,6 +31,15 @@ jobs:
       - name: Configure Image Builder (Feeds, Signature, PartSize, and Daede Automation)
         run: |
           cd imagebuilder
+          
+          # ==================== 【终极釜底抽薪】废掉所有虚拟机格式转换 ====================
+          # 直接在 IB 内部的 host 目录提前塞入一个假的 qemu-img 脚本
+          # 这样 Makefile 执行 qcow2/vhd/vmdk/vdi 转换时会直接调用这个假脚本，瞬间秒过且不报错
+          mkdir -p staging_dir/host/bin
+          echo -e '#!/bin/sh\necho "qemu-img bypassed!"' > staging_dir/host/bin/qemu-img
+          chmod +x staging_dir/host/bin/qemu-img
+          # ==============================================================================
+
           # 1. 屏蔽签名验证
           sed -i 's/option check_signature/# option check_signature/g' repositories.conf
           
@@ -50,22 +59,10 @@ jobs:
           cat tmac_arch.conf >> repositories.conf
           rm tmac_arch.conf
 
-          # 6. 【终极暴风提速】直接修改底层镜像生成脚本，从物理上彻底断绝 vhdx/vmdk/vdi/qcow2 虚拟盘格式的生成
-          if [ -f include/image.mk ]; then
-              # 废掉全局的 qemu-img 转换命令，让所有虚拟格式转换失去核心动力
-              sed -i 's/$(QEMU_IMG)/# $(QEMU_IMG)/g' include/image.mk
-          fi
-          if [ -f target/linux/x86/image/Makefile ]; then
-              # 强行注释掉 x86 架构下所有触发 VM、Qemu、VBox 镜像生成的追加宏（四大金刚彻底封杀）
-              sed -i 's/$(eval $(call Image\/Build\/Vm))/# $(eval $(call Image\/Build\/Vm))/g' target/linux/x86/image/Makefile
-              sed -i 's/$(eval $(call Image\/Build\/Qemu))/# $(eval $(call Image\/Build\/Qemu))/g' target/linux/x86/image/Makefile
-              sed -i 's/$(eval $(call Image\/Build\/VBox))/# $(eval $(call Image\/Build\/VBox))/g' target/linux/x86/image/Makefile
-          fi
-
-          # 7. 创建 files 对应目录拓扑
+          # 6. 创建 files 对应目录拓扑
           mkdir -p files/etc/uci-defaults
 
-          # 8. 生成持久化网络检测与 daede 自动安装脚本
+          # 7. 生成持久化网络检测与 daede 自动安装脚本
           cat << 'EOF' > files/etc/daede-autoplay.sh
           #!/bin/sh
 
@@ -105,7 +102,7 @@ jobs:
           exit 0
           EOF
 
-          # 9. 生成首次开机释放 cron 任务的 uci-defaults 触发器
+          # 8. 生成首次开机释放 cron 任务的 uci-defaults 触发器
           cat << 'EOF' > files/etc/uci-defaults/99-init-daede-cron
           #!/bin/sh
           # 向 crontabs 写入规则：每分钟执行一次检测脚本
@@ -117,7 +114,7 @@ jobs:
           exit 0
           EOF
 
-          # 10. 统一赋予宿主机打包环境下的可执行权限，确保随 rootfs 打包后权限正确
+          # 9. 统一赋予宿主机打包环境下的可执行权限，确保随 rootfs 打包后权限正确
           chmod +x files/etc/daede-autoplay.sh
           chmod +x files/etc/uci-defaults/99-init-daede-cron
           
