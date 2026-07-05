@@ -143,37 +143,36 @@ jobs:
           sudo umount mnt
           sudo losetup -d /dev/loop0    
           
-      - name: Create Custom Initramfs (Installer)
+            - name: Create Custom Initramfs (Installer)
         run: |
-          mkdir -p initrd_root/bin initrd_root/sbin initrd_root/etc initrd_root/dev \
-                   initrd_root/proc initrd_root/sys initrd_root/mnt initrd_root/mnt_test
-          
-          # 创建模块目录并复制提取的模块（如果上一步成功提取）
-          mkdir -p initrd_root/lib/modules/${KERNEL_VERSION}
-          cp initrd_modules/*.ko initrd_root/lib/modules/${KERNEL_VERSION}/ 2>/dev/null || true
-          
-          cp $(which busybox) initrd_root/bin/busybox
+          # ... 前面的 mkdir 和复制 busybox 不变 ...
           
           cat << 'SCRIPT_EOF' > initrd_root/init
           #!/bin/busybox sh
+          # 颜色定义
+          RED='\033[31m'
+          GREEN='\033[32m'
+          YELLOW='\033[33m'
+          CYAN='\033[36m'
+          NC='\033[0m' # No Color
+
           /bin/busybox --install -s /bin
           mount -t proc proc /proc
           mount -t sysfs sysfs /sys
           mount -t devtmpfs devtmpfs /dev 2>/dev/null || mdev -s
-          
-          # 选择性加载模块（文件不存在则跳过，不报错）
+
+          # 选择性加载模块（静默跳过不存在的）
           KVER=$(uname -r)
           MODPATH=/lib/modules/$KVER
           for mod in nls_base nls_iso8859-1 nls_cp437 cdrom sr_mod isofs; do
-              if [ -f "$MODPATH/$mod.ko" ]; then
-                  insmod "$MODPATH/$mod.ko" 2>/dev/null
-              fi
+              [ -f "$MODPATH/$mod.ko" ] && insmod "$MODPATH/$mod.ko" 2>/dev/null
           done
-          
-          echo "===================================================="
-          echo "      ImmortalWrt Unattended Automated Installer     "
-          echo "===================================================="
-          
+
+          echo -e "${CYAN}====================================================${NC}"
+          echo -e "${CYAN}      ImmortalWrt Unattended Automated Installer     ${NC}"
+          echo -e "${CYAN}====================================================${NC}"
+
+          echo -e "${YELLOW}[*] Searching for installation media...${NC}"
           ISO_DEV=""
           ISO_MOUNT=""
           for dev in /dev/sr* /dev/sd* /dev/nvme*; do
@@ -183,60 +182,69 @@ jobs:
                       if [ -f /mnt_test/openwrt.img ]; then
                           ISO_DEV="$dev"
                           ISO_MOUNT="/mnt_test"
-                          echo "Found installation media: $ISO_DEV"
+                          echo -e "${GREEN}[✓] Found: $ISO_DEV${NC}"
                           break
                       fi
                       umount /mnt_test
                   fi
               fi
           done
-          
+
           if [ -z "$ISO_DEV" ]; then
-              echo "ERROR: Installation source media (openwrt.img) not found!"
+              echo -e "${RED}[✗] ERROR: Installation source not found!${NC}"
               exec sh
           fi
-          
-          # 计算安装介质对应的磁盘（用于排除）
+
           ISO_DISK=$(echo "$ISO_DEV" | sed -E 's/p?[0-9]+$//')
-          
+
+          echo -e "${YELLOW}[*] Scanning for target disk...${NC}"
           TARGET_DISK=""
           for dev in /sys/block/*; do
               devname=$(basename $dev)
               case "$devname" in
                   sr*|loop*|ram*|dm-*) continue ;;
               esac
-              
-              if [ "/dev/$devname" = "$ISO_DISK" ]; then
-                  continue
-              fi
-              
+              [ "/dev/$devname" = "$ISO_DISK" ] && continue
               size=$(cat "$dev/size")
               if [ "$size" -gt 0 ]; then
                   TARGET_DISK="/dev/$devname"
                   break
               fi
           done
-          
+
           if [ -z "$TARGET_DISK" ]; then
-              echo "ERROR: Destination disk not found!"
+              echo -e "${RED}[✗] ERROR: Destination disk not found!${NC}"
               exec sh
           fi
-          
-          echo "Target disk detected: $TARGET_DISK"
-          echo "Writing image to $TARGET_DISK... Please wait..."
-          
-          # 直接从 ISO 挂载点流式写入目标磁盘，无需复制到内存
-          dd if=${ISO_MOUNT}/openwrt.img of=$TARGET_DISK bs=4M
+
+          echo -e "${GREEN}[✓] Target disk: $TARGET_DISK${NC}"
+          echo -e "${YELLOW}[*] Writing image to $TARGET_DISK (please wait)...${NC}"
+
+          # 旋转等待动画（后台检测 dd 进程）
+          dd if=${ISO_MOUNT}/openwrt.img of=$TARGET_DISK bs=4M &
+          DD_PID=$!
+          spin='-\|/'
+          i=0
+          while kill -0 $DD_PID 2>/dev/null; do
+              i=$(( (i+1) % 4 ))
+              # 使用 \r 回到行首 + 清除到行尾 + 颜色
+              printf "\r${GREEN}[%c]${NC} Flushing data to disk... " "${spin:$i:1}"
+              sleep 0.5
+          done
+          wait $DD_PID
+          printf "\r${GREEN}[✓]${NC} Data write completed.          \n"
+
           sync
-          
-          echo "Success! System installation finished."
-          echo "The machine will power off in 5 seconds. Please remove the USB drive."
+          echo -e "${GREEN}========================================${NC}"
+          echo -e "${GREEN}  Installation finished successfully!   ${NC}"
+          echo -e "${GREEN}  System will power off in 5 seconds.   ${NC}"
+          echo -e "${GREEN}  Please remove the installation media. ${NC}"
+          echo -e "${GREEN}========================================${NC}"
           sleep 5
           poweroff -f
           SCRIPT_EOF
-          
+
           chmod +x initrd_root/init
-          
           cd initrd_root
           find . | cpio -H newc -o | gzip -9 > ../initrd.gz
           cd ..
