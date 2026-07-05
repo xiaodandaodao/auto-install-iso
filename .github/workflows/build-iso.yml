@@ -31,21 +31,41 @@ jobs:
       - name: Configure Image Builder (Feeds, Signature, PartSize, and Daede Automation)
         run: |
           cd imagebuilder
-          # ==================== 【天王老子来了也得秒过】欺骗流提速 ====================
-          # 既然 Makefile 强制要生成并重命名这些虚拟机文件，那我们就整一个“高仿复印机”
-          # 无论它想转成什么格式，我们都一瞬间用空文件/基础文件顶替，既不耗费 CPU 转换，又能完美满足它的 mv 命令
+          # ==================== 【终极合璧】dd + qemu-img 双重智能拦截 ====================
           mkdir -p staging_dir/host/bin
+
+          # 1. 创建高智商伪 dd 脚本：剥离所有虚拟机相关的 I/O 写入
+          cat << 'EOF' > staging_dir/host/bin/dd
+          #!/bin/sh
+          case "$*" in
+              *vmdk*|*qcow2*|*vdi*|*vhdx*)
+                  # 只要发现是虚拟机格式或其衍生的临时文件，0秒 touch 敷衍过去
+                  for arg do
+                      case "$arg" in
+                          of=*) touch "${arg#of=}" ;;
+                      esac
+                  done
+                  echo "dd bypassed for virtual disk!"
+                  ;;
+              *)
+                  # 普通的物理 .img 镜像，放行调用系统真正的 dd
+                  /bin/dd "$@"
+                  ;;
+          esac
+          EOF
+          chmod +x staging_dir/host/bin/dd
+
+          # 2. 创建高智商伪 qemu-img 脚本：确保 .new 文件完美生成，迎合 Makefile 的 mv 动作
           cat << 'EOF' > staging_dir/host/bin/qemu-img
           #!/bin/sh
-          # 捕获 Makefile 传过来的最后一个参数（通常是输出的虚拟机文件路径）
           for arg do :; done
-          # 瞬间创建一个空文件（或者极小的文件），假装转换成功了
+          # 瞬间创建假的目标文件和 .new 文件，秒过且不报错
           touch "$arg"
           touch "${arg}.new"
-          echo "qemu-img successfully precision-bypassed for $arg"
+          echo "qemu-img bypassed for $arg"
           EOF
           chmod +x staging_dir/host/bin/qemu-img
-          # ============================================================================
+          # ==============================================================================
 
           # 1. 屏蔽签名验证
           sed -i 's/option check_signature/# option check_signature/g' repositories.conf
