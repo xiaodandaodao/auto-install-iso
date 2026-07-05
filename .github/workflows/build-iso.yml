@@ -143,25 +143,30 @@ jobs:
           sudo umount mnt
           sudo losetup -d /dev/loop0    
           
-      - name: Create Custom Initramfs (Installer)
+            - name: Create Custom Initramfs (Installer)
         run: |
-          # ... 前面的 mkdir 和复制 busybox 不变 ...
-          
+          mkdir -p initrd_root/bin initrd_root/sbin initrd_root/etc initrd_root/dev \
+                   initrd_root/proc initrd_root/sys initrd_root/mnt initrd_root/mnt_test
+
+          # 创建模块目录并复制提取的模块
+          mkdir -p initrd_root/lib/modules/${KERNEL_VERSION}
+          cp initrd_modules/*.ko initrd_root/lib/modules/${KERNEL_VERSION}/ 2>/dev/null || true
+
+          cp $(which busybox) initrd_root/bin/busybox
+
           cat << 'SCRIPT_EOF' > initrd_root/init
           #!/bin/busybox sh
-          # 颜色定义
           RED='\033[31m'
           GREEN='\033[32m'
           YELLOW='\033[33m'
           CYAN='\033[36m'
-          NC='\033[0m' # No Color
+          NC='\033[0m'
 
           /bin/busybox --install -s /bin
           mount -t proc proc /proc
           mount -t sysfs sysfs /sys
           mount -t devtmpfs devtmpfs /dev 2>/dev/null || mdev -s
 
-          # 选择性加载模块（静默跳过不存在的）
           KVER=$(uname -r)
           MODPATH=/lib/modules/$KVER
           for mod in nls_base nls_iso8859-1 nls_cp437 cdrom sr_mod isofs; do
@@ -220,14 +225,12 @@ jobs:
           echo -e "${GREEN}[✓] Target disk: $TARGET_DISK${NC}"
           echo -e "${YELLOW}[*] Writing image to $TARGET_DISK (please wait)...${NC}"
 
-          # 旋转等待动画（后台检测 dd 进程）
           dd if=${ISO_MOUNT}/openwrt.img of=$TARGET_DISK bs=4M &
           DD_PID=$!
           spin='-\|/'
           i=0
           while kill -0 $DD_PID 2>/dev/null; do
               i=$(( (i+1) % 4 ))
-              # 使用 \r 回到行首 + 清除到行尾 + 颜色
               printf "\r${GREEN}[%c]${NC} Flushing data to disk... " "${spin:$i:1}"
               sleep 0.5
           done
@@ -245,6 +248,7 @@ jobs:
           SCRIPT_EOF
 
           chmod +x initrd_root/init
+
           cd initrd_root
           find . | cpio -H newc -o | gzip -9 > ../initrd.gz
           cd ..
