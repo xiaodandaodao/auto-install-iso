@@ -17,10 +17,10 @@ jobs:
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          # 已安全移除 qemu-utils，保持环境纯净
-          sudo apt-get install -y zstd gawk gettext xz-utils xsltproc \
+          # 加回 qemu-utils 满足底层依赖，让编译链畅通无阻
+          sudo apt-get install -y zstd gawk gettext xz-utils xsltproc qemu-utils \
             grub-pc-bin grub-efi-amd64-bin xorriso mtools libisoburn1 busybox-static cpio
-
+            
       - name: Download and Extract Image Builder
         run: |
           wget https://downloads.immortalwrt.org/releases/24.10.6/targets/x86/64/immortalwrt-imagebuilder-24.10.6-x86-64.Linux-x86_64.tar.zst
@@ -30,7 +30,7 @@ jobs:
       - name: Configure Image Builder (Feeds, Signature, PartSize, and Dae Bypass)
         run: |
           cd imagebuilder
-          # 1. 修正：移除错误的 etc/opkg.conf，只对 Image Builder 根目录的配置文件做处理
+          # 1. 屏蔽签名验证
           sed -i 's/option check_signature/# option check_signature/g' repositories.conf
           
           # 2. 注入第三方源
@@ -39,18 +39,7 @@ jobs:
           # 3. 锁定 Rootfs 分区为 512MB
           echo "CONFIG_TARGET_ROOTFS_PARTSIZE=512" >> .config
 
-          # ======= 👇【核心修正】：直接从底层 Makefile 中物理切除虚拟机格式 👇 =======
-          # 移除移除 make defconfig，直接修改 x86 专用的镜像生成规则文件
-          TARGET_MAKEFILE="target/linux/x86/image/Makefile"
-          if [ -f "$TARGET_MAKEFILE" ]; then
-            sed -i 's/combined.qcow2//g' "$TARGET_MAKEFILE"
-            sed -i 's/combined.vmdk//g' "$TARGET_MAKEFILE"
-            sed -i 's/combined.vhdx//g' "$TARGET_MAKEFILE"
-            sed -i 's/combined.vdi//g' "$TARGET_MAKEFILE"
-          fi
-          # =========================================================================
-
-          # 4. 创建离线包目录与脚本（保持之前的解耦逻辑不变）
+          # 4. 创建离线包目录与脚本
           mkdir -p files/root/pkgs
           mkdir -p files/etc/uci-defaults
 
