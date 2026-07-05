@@ -101,18 +101,26 @@ jobs:
 
           # 联动优化：注释掉官方 src/gz openwrt_core 以外的不必要源（比如大而全的 packages/routing 等），只留核心和你的第三方源
           # 这能让打包时的 opkg 索引速度提升数倍
-          sed -i '/_packages/s/^/#/' repositories.conf
+          # 1. 恢复之前误杀的官方源，但只留 base 和 packages（保证 ruby, bash, curl, sqm 能找到）
+          # 依然注释掉非常臃肿且用不到的 routing 和 telephony，维持加速效果
           sed -i '/_routing/s/^/#/' repositories.conf
           sed -i '/_telephony/s/^/#/' repositories.conf
+
+          # 2. 【核心修复】强制允许第三方源的架构，忽略 "incompatible with the architectures" 报错
+          # 向 opkg 配置文件中注入你的物理架构属性，让它强行接受编译好的 x86_64 包
+          echo "arch all 100" >> tmac_arch.conf
+          echo "arch x86_64 200" >> tmac_arch.conf
+          cat tmac_arch.conf >> repositories.conf
+          rm tmac_arch.conf
           
       - name: Build Firmware Image
         run: |
           cd imagebuilder
           
-          # 利用物理多核加速打包（GitHub Actions 免费机型通常有 2 核，使用 -j2）
-          # 同时，精简了 PACKAGES 列表，去掉了不必要的依赖显式声明（因为 opkg 会自动解析依赖）
+          # 显式补回 OpenClash 缺失的硬依赖（bash, curl, ruby, ruby-yaml, unzip 等）
+          # 以及 SQM 缺失的底层组件，确保打包彻底通过
           make image PROFILE=generic -j$(nproc) \
-            PACKAGES="luci-app-openclash sqm-scripts luci-app-sqm -dnsmasq -dnsmasq-dhcpv6 dnsmasq-full" \
+            PACKAGES="luci-app-openclash sqm-scripts luci-app-sqm -dnsmasq -dnsmasq-dhcpv6 dnsmasq-full bash curl ca-bundle coreutils-nohup libcap-bin kmod-nft-tproxy ip-full ruby ruby-yaml unzip lm-sensors cgi-io" \
             CONFIG_TARGET_ROOTFS_PARTSIZE=512 \
             FILES=files
             
