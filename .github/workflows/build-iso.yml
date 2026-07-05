@@ -80,7 +80,16 @@ jobs:
         run: |
           IMAGE_PATH=$(ls imagebuilder/bin/targets/x86/64/*combined-efi.img.gz | head -n 1)
           echo "Target image found: $IMAGE_PATH"
-          gunzip -c "$IMAGE_PATH" > openwrt.img
+          
+          # 【核心修正】：用 || true 忽略 gunzip 针对分区填充数据产生的“假报错”(Exit Code 2)
+          gunzip -c "$IMAGE_PATH" > openwrt.img || true
+          
+          # 增加一道防线：确保解压出来的固件文件存在，且体积不为 0
+          if [ ! -s openwrt.img ]; then
+            echo "Error: Firmware extraction failed!"
+            exit 1
+          fi
+          echo "Firmware successfully extracted."
           
           if [ -f imagebuilder/bin/targets/x86/64/vmlinuz ]; then
             cp imagebuilder/bin/targets/x86/64/vmlinuz kernel.bin
