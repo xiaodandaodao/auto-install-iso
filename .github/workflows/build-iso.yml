@@ -28,7 +28,7 @@ jobs:
           tar -I zstd -xf immortalwrt-imagebuilder-24.10.6-x86-64.Linux-x86_64.tar.zst
           mv immortalwrt-imagebuilder-24.10.6-x86-64.Linux-x86_64 imagebuilder
 
-      - name: Configure Image Builder (Feeds, Signature, PartSize, and Dae Bypass)
+      - name: Configure Image Builder (Feeds, Signature, PartSize, and Daede Automation)
         run: |
           cd imagebuilder
           # 1. 屏蔽签名验证
@@ -40,30 +40,64 @@ jobs:
           # 3. 锁定 Rootfs 分区为 512MB
           echo "CONFIG_TARGET_ROOTFS_PARTSIZE=512" >> .config
 
-          # 4. 创建离线包目录与脚本
-          mkdir -p files/root/pkgs
+          # 4. 创建 files 对应目录拓扑
           mkdir -p files/etc/uci-defaults
 
-          FEED_URL="https://down.dllkids.xyz/openwrt-feed/x86_64"
-          curl -s "${FEED_URL}/Packages" > temp_packages
-          for pkg in dae daed luci-app-daede; do
-            IPK_PATH=$(grep -A 10 "Package: ${pkg}$" temp_packages | grep "Filename:" | awk '{print $2}')
-            if [ ! -z "$IPK_PATH" ]; then
-              wget -P files/root/pkgs "${FEED_URL}/${IPK_PATH}"
-            fi
-          done
-          rm temp_packages
-
-          cat << 'EOF' > files/etc/uci-defaults/99-install-dae
+          # 5. 生成持久化网络检测与 daede 自动安装脚本
+          cat << 'EOF' > files/etc/daede-autoplay.sh
           #!/bin/sh
-          if [ -d /root/pkgs ]; then
-              logger -t "INSTALLER" "Starting offline installation for DAE/DAED..."
-              opkg install /root/pkgs/*.ipk --force-depends
-              rm -rf /root/pkgs
+
+          # 检查是否已经安装过（双重保险，如果检测到服务已存在，直接自毁）
+          if [ -f "/etc/init.d/daede" ] || [ -f "/etc/init.d/daed" ]; then
+              sed -i '/daede-autoplay.sh/d' /etc/crontabs/root
+              rm -f "$0"
+              exit 0
           fi
+
+          # 检测网络：尝试 ping 镜像加速站，通了就继续，不通则退出等待下一分钟的 cron 触发
+          if ! ping -c 1 -W 2 ghfast.top >/dev/null 2>&1; then
+              exit 0
+          fi
+
+          # 走到这里说明网络通了，开始安装
+          echo "网络已通，开始无人值守安装 daede..." | logger -t daede-init
+
+          # 执行作者的一键脚本（用 yes "" 自动应对所有回车交互）
+          yes "" | wget --no-check-certificate -O - https://ghfast.top/https://raw.githubusercontent.com/kenzok8/openwrt-daede/refs/heads/main/scripts/install.sh | ash 2>&1 | logger -t daede-init
+
+          # 安装后兜底：确保使能并启动服务
+          if [ -f "/etc/init.d/daede" ]; then
+              /etc/init.d/daede enable
+              /etc/init.d/daede start
+          elif [ -f "/etc/init.d/daed" ]; then
+              /etc/init.d/daed enable
+              /etc/init.d/daed start
+          fi
+
+          # 安装完成，卸磨杀驴：从 cron 中移除自己，重启 cron 并彻底自毁脚本本体
+          sed -i '/daede-autoplay.sh/d' /etc/crontabs/root
+          /etc/init.d/cron restart
+          rm -f "$0"
+
+          echo "daede 安装完成，自动化脚本已自毁并解除定时任务。" | logger -t daede-init
           exit 0
           EOF
-          chmod +x files/etc/uci-defaults/99-install-dae
+
+          # 6. 生成首次开机释放 cron 任务的 uci-defaults 触发器
+          cat << 'EOF' > files/etc/uci-defaults/99-init-daede-cron
+          #!/bin/sh
+          # 向 crontabs 写入规则：每分钟执行一次检测脚本
+          echo "* * * * * /etc/daede-autoplay.sh" >> /etc/crontabs/root
+
+          # 启动并重启 cron 服务
+          /etc/init.d/cron enable
+          /etc/init.d/cron restart
+          exit 0
+          EOF
+
+          # 7. 赋予宿主机打包环境下的可执行权限，确保随 rootfs 打包后权限正确
+          chmod +x files/etc/daede-autoplay.sh
+          chmod +x files/etc/uci-defaults/99-init-daede-cron
           
       - name: Build Firmware Image
         run: |
