@@ -37,8 +37,13 @@ jobs:
           # 2. 注入第三方源
           echo "src/gz dllkids_packages https://down.dllkids.xyz/openwrt-feed/x86_64" >> repositories.conf
           
-          # 3. 锁定 Rootfs 分区为 512MB
+          # 3. 锁定 Rootfs 分区为 512MB，并禁用所有不需要的虚拟机磁盘格式 (VHDX, VMDK, QCOW2)
           echo "CONFIG_TARGET_ROOTFS_PARTSIZE=512" >> .config
+          
+          # 【核心提速点】显式关闭虚拟机镜像打包，仅保留常规的 img 镜像生成
+          echo "CONFIG_VM_IMAGES=n" >> .config
+          echo "CONFIG_QEMU_IMAGES=n" >> .config
+          echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config
 
           # 4. 创建 files 对应目录拓扑
           mkdir -p files/etc/uci-defaults
