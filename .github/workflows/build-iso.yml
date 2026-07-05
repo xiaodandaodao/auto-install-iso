@@ -3,7 +3,6 @@ name: Build ImmortalWrt Unattended ISO via Image Builder
 on:
   workflow_dispatch: # 支持手动触发
 
-# 核心修改点 1：必须显式声明写权限，否则 Actions 无法自动创建 Release
 permissions:
   contents: write
 
@@ -30,20 +29,23 @@ jobs:
       - name: Configure Image Builder (Feeds, Signature, PartSize)
         run: |
           cd imagebuilder
+          # 1. 屏蔽签名验证，允许拉取自定义第三方包
           sed -i 's/option check_signature/# option check_signature/g' repositories.conf
           sed -i 's/option check_signature/# option check_signature/g' etc/opkg.conf || true
           
-          echo "src/gz dllkids_base https://op.dllkids.xyz/packages/x86_64/base" >> repositories.conf
-          echo "src/gz dllkids_luci https://op.dllkids.xyz/packages/x86_64/luci" >> repositories.conf
+          # 2. 【核心修正】：替换为此前 Chroot 方案中物理验证成功的、绝对兼容的第三方源 URL
+          echo "src/gz dllkids_packages https://down.dllkids.xyz/openwrt-feed/x86_64" >> repositories.conf
           
+          # 3. 锁定 Rootfs 分区为 512MB
           echo "CONFIG_TARGET_ROOTFS_PARTSIZE=512" >> .config
           sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=[0-9]*/CONFIG_TARGET_ROOTFS_PARTSIZE=512/g' .config 2>/dev/null || true
 
       - name: Build Firmware Image
         run: |
           cd imagebuilder
+          # 这里的 PACKAGES 已经过优化，全面对齐兼容层，并执行 Dnsmasq 彻底清场
           make image PROFILE=generic \
-            PACKAGES="luci-app-openclash dae daed luci-app-daede sqm-scripts luci-app-sqm -dnsmasq -dnsmasq-dhcpv6 dnsmasq-full bash curl ca-bundle coreutils-nohup libcap-bin" \
+            PACKAGES="luci-app-openclash dae daed luci-app-daede sqm-scripts luci-app-sqm -dnsmasq -dnsmasq-dhcpv6 -dnsmasq-full dnsmasq-full bash curl ca-bundle coreutils-nohup libcap-bin" \
             CONFIG_TARGET_ROOTFS_PARTSIZE=512
 
       - name: Extract Firmware and Kernel
@@ -157,7 +159,6 @@ jobs:
           
           grub-mkrescue -o immortalwrt-24.10.6-x86-64-unattended.iso iso_root
 
-      # 核心修改点 2：将产物直接以 Release 形式推送到仓库发布页
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -170,5 +171,5 @@ jobs:
             - **固件底包**：ImmortalWrt 24.10.6 (x86_64)
             - **根分区大小**：原生 512MB
             - **集成插件**：OpenClash, Dae, Daed, SQM
-            - **网络依赖修补**：已强制替换为 `dnsmasq-full` 并固化组件运行核心周边链
+            - **源兼容修复**：已修正为通过验证的第三方插件归档拓扑源。
           files: immortalwrt-24.10.6-x86-64-unattended.iso
