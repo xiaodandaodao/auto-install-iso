@@ -17,9 +17,10 @@ jobs:
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          # 加回 qemu-utils 满足底层依赖，让编译链畅通无阻
+          # 在末尾补充了 genisoimage 和 syslinux，彻底满足官方底层生成 ISO 的环境要求
           sudo apt-get install -y zstd gawk gettext xz-utils xsltproc qemu-utils \
-            grub-pc-bin grub-efi-amd64-bin xorriso mtools libisoburn1 busybox-static cpio
+            grub-pc-bin grub-efi-amd64-bin xorriso mtools libisoburn1 busybox-static cpio \
+            genisoimage syslinux
             
       - name: Download and Extract Image Builder
         run: |
