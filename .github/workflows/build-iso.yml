@@ -37,18 +37,35 @@ jobs:
           # 2. 注入第三方源
           echo "src/gz dllkids_packages https://down.dllkids.xyz/openwrt-feed/x86_64" >> repositories.conf
           
-          # 3. 锁定 Rootfs 分区为 512MB，并禁用所有不需要的虚拟机磁盘格式 (VHDX, VMDK, QCOW2)
+          # 3. 锁定 Rootfs 分区为 512MB
           echo "CONFIG_TARGET_ROOTFS_PARTSIZE=512" >> .config
           
-          # 【核心提速点】显式关闭虚拟机镜像打包，仅保留常规的 img 镜像生成
-          echo "CONFIG_VM_IMAGES=n" >> .config
-          echo "CONFIG_QEMU_IMAGES=n" >> .config
-          echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config
+          # 4. 【软件源提速】注释掉官方极其臃肿的 routing 和 telephony 源，大幅精简 opkg 索引时间
+          sed -i '/_routing/s/^/#/' repositories.conf
+          sed -i '/_telephony/s/^/#/' repositories.conf
 
-          # 4. 创建 files 对应目录拓扑
+          # 5. 【架构兼容修复】强行注入 x86_64 架构属性，彻底解决第三方源中特定包（如 luci-base）的架构不兼容报错
+          echo "arch all 100" >> tmac_arch.conf
+          echo "arch x86_64 200" >> tmac_arch.conf
+          cat tmac_arch.conf >> repositories.conf
+          rm tmac_arch.conf
+
+          # 6. 【终极暴风提速】直接修改底层镜像生成脚本，从物理上彻底断绝 vhdx/vmdk/vdi/qcow2 虚拟盘格式的生成
+          if [ -f include/image.mk ]; then
+              # 废掉全局的 qemu-img 转换命令，让所有虚拟格式转换失去核心动力
+              sed -i 's/$(QEMU_IMG)/# $(QEMU_IMG)/g' include/image.mk
+          fi
+          if [ -f target/linux/x86/image/Makefile ]; then
+              # 强行注释掉 x86 架构下所有触发 VM、Qemu、VBox 镜像生成的追加宏（四大金刚彻底封杀）
+              sed -i 's/$(eval $(call Image\/Build\/Vm))/# $(eval $(call Image\/Build\/Vm))/g' target/linux/x86/image/Makefile
+              sed -i 's/$(eval $(call Image\/Build\/Qemu))/# $(eval $(call Image\/Build\/Qemu))/g' target/linux/x86/image/Makefile
+              sed -i 's/$(eval $(call Image\/Build\/VBox))/# $(eval $(call Image\/Build\/VBox))/g' target/linux/x86/image/Makefile
+          fi
+
+          # 7. 创建 files 对应目录拓扑
           mkdir -p files/etc/uci-defaults
 
-          # 5. 生成持久化网络检测与 daede 自动安装脚本
+          # 8. 生成持久化网络检测与 daede 自动安装脚本
           cat << 'EOF' > files/etc/daede-autoplay.sh
           #!/bin/sh
 
@@ -88,7 +105,7 @@ jobs:
           exit 0
           EOF
 
-          # 6. 生成首次开机释放 cron 任务的 uci-defaults 触发器
+          # 9. 生成首次开机释放 cron 任务的 uci-defaults 触发器
           cat << 'EOF' > files/etc/uci-defaults/99-init-daede-cron
           #!/bin/sh
           # 向 crontabs 写入规则：每分钟执行一次检测脚本
@@ -100,23 +117,9 @@ jobs:
           exit 0
           EOF
 
-          # 7. 赋予宿主机打包环境下的可执行权限，确保随 rootfs 打包后权限正确
+          # 10. 统一赋予宿主机打包环境下的可执行权限，确保随 rootfs 打包后权限正确
           chmod +x files/etc/daede-autoplay.sh
           chmod +x files/etc/uci-defaults/99-init-daede-cron
-
-          # 联动优化：注释掉官方 src/gz openwrt_core 以外的不必要源（比如大而全的 packages/routing 等），只留核心和你的第三方源
-          # 这能让打包时的 opkg 索引速度提升数倍
-          # 1. 恢复之前误杀的官方源，但只留 base 和 packages（保证 ruby, bash, curl, sqm 能找到）
-          # 依然注释掉非常臃肿且用不到的 routing 和 telephony，维持加速效果
-          sed -i '/_routing/s/^/#/' repositories.conf
-          sed -i '/_telephony/s/^/#/' repositories.conf
-
-          # 2. 【核心修复】强制允许第三方源的架构，忽略 "incompatible with the architectures" 报错
-          # 向 opkg 配置文件中注入你的物理架构属性，让它强行接受编译好的 x86_64 包
-          echo "arch all 100" >> tmac_arch.conf
-          echo "arch x86_64 200" >> tmac_arch.conf
-          cat tmac_arch.conf >> repositories.conf
-          rm tmac_arch.conf
           
       - name: Build Firmware Image
         run: |
