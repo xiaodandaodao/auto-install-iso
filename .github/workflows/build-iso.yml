@@ -35,9 +35,8 @@ jobs:
           # ==================== 【终极釜底抽薪】废掉所有虚拟机格式转换 ====================
           # 直接在 IB 内部的 host 目录提前塞入一个假的 qemu-img 脚本
           # 这样 Makefile 执行 qcow2/vhd/vmdk/vdi 转换时会直接调用这个假脚本，瞬间秒过且不报错
-          mkdir -p staging_dir/host/bin
-          echo -e '#!/bin/sh\necho "qemu-img bypassed!"' > staging_dir/host/bin/qemu-img
-          chmod +x staging_dir/host/bin/qemu-img
+          
+      
           # ==============================================================================
 
           # 1. 屏蔽签名验证
@@ -122,11 +121,12 @@ jobs:
         run: |
           cd imagebuilder
           
-          # 显式补回 OpenClash 缺失的硬依赖（bash, curl, ruby, ruby-yaml, unzip 等）
-          # 以及 SQM 缺失的底层组件，确保打包彻底通过
+          # 【降维打击】通过强行重写 IMAGES 变量，只保留最核心的、你物理机需要的 EFI 固件
+          # 这样底层 Makefile 根本不会去扫描、也不会去执行任何虚拟机镜像的打包和重命名逻辑！
           make image PROFILE=generic -j$(nproc) \
             PACKAGES="luci-app-openclash sqm-scripts luci-app-sqm -dnsmasq -dnsmasq-dhcpv6 dnsmasq-full bash curl ca-bundle coreutils-nohup libcap-bin kmod-nft-tproxy ip-full ruby ruby-yaml unzip lm-sensors cgi-io" \
             CONFIG_TARGET_ROOTFS_PARTSIZE=512 \
+            IMAGES="generic-squashfs-combined-efi.img.gz generic-ext4-combined-efi.img.gz" \
             FILES=files
             
       - name: Extract Firmware and Kernel
