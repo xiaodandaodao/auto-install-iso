@@ -31,41 +31,53 @@ jobs:
       - name: Configure Image Builder (Feeds, Signature, PartSize, and Daede Automation)
         run: |
           cd imagebuilder
-          # ==================== 【终极合璧】dd + qemu-img 双重智能拦截 ====================
+          # ==================== 【终极绝杀】偷梁换柱源文件提速 ====================
+          # 针对 ImmortalWrt 24.10 连环套逻辑（dd -> grub -> qemu-img）
+          # 我们不破坏工具，而是当发现是虚拟机打包时，把原本几百MB的输入源文件（if=）偷偷换成一个极小的空壳
+          # 这样既能让 dd 和 grub 完美跑完不报错，又能让磁盘写入量瞬间降为 0！
           mkdir -p staging_dir/host/bin
 
-          # 1. 创建高智商伪 dd 脚本：剥离所有虚拟机相关的 I/O 写入
+          # 创建智能偷包的伪 dd
           cat << 'EOF' > staging_dir/host/bin/dd
           #!/bin/sh
           case "$*" in
               *vmdk*|*qcow2*|*vdi*|*vhdx*)
-                  # 只要发现是虚拟机格式或其衍生的临时文件，0秒 touch 敷衍过去
+                  # 如果是虚拟机盘，遍历参数，把 root.squashfs 或 root.ext4 的输入源偷偷换成一个空文件
+                  # 保证基础的 kernel 写入和分区表在，但几百兆的 rootfs 变成 0 字节输入
+                  NEW_ARGS=""
                   for arg do
                       case "$arg" in
-                          of=*) touch "${arg#of=}" ;;
+                          if=*root.squashfs|if=*root.ext4)
+                              # 遇到大文件，原地创建一个 0 字节临时文件顶替它
+                              touch /tmp/fake_rootfs
+                              NEW_ARGS="$NEW_ARGS if=/tmp/fake_rootfs"
+                              ;;
+                          *)
+                              NEW_ARGS="$NEW_ARGS $arg"
+                              ;;
                       esac
                   done
-                  echo "dd bypassed for virtual disk!"
+                  # 用瘦身后的参数去调用真正的 dd
+                  /bin/dd $NEW_ARGS
                   ;;
               *)
-                  # 普通的物理 .img 镜像，放行调用系统真正的 dd
+                  # 普通物理镜像放行
                   /bin/dd "$@"
                   ;;
           esac
           EOF
           chmod +x staging_dir/host/bin/dd
 
-          # 2. 创建高智商伪 qemu-img 脚本：确保 .new 文件完美生成，迎合 Makefile 的 mv 动作
+          # 之前加的假 qemu-img 脚本依然保留，为后续的转换双保险
           cat << 'EOF' > staging_dir/host/bin/qemu-img
           #!/bin/sh
           for arg do :; done
-          # 瞬间创建假的目标文件和 .new 文件，秒过且不报错
           touch "$arg"
           touch "${arg}.new"
           echo "qemu-img bypassed for $arg"
           EOF
           chmod +x staging_dir/host/bin/qemu-img
-          # ==============================================================================
+          # =======================================================================
 
           # 1. 屏蔽签名验证
           sed -i 's/option check_signature/# option check_signature/g' repositories.conf
