@@ -96,19 +96,58 @@ jobs:
           else
             cp imagebuilder/bin/targets/x86/64/*-generic-kernel.bin kernel.bin
           fi
+          
+      - name: Extract Kernel Modules from Firmware Image
+        run: |
+          sudo losetup -P /dev/loop0 openwrt.img
+          sleep 1
+          mkdir -p mnt
+          # 挂载第二个分区（通常是 rootfs）
+          sudo mount /dev/loop0p2 mnt
+          KERNEL_VERSION=$(ls mnt/lib/modules/ | head -n 1)
+          echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
+          mkdir -p initrd_modules
+          for mod in cdrom sr_mod isofs nls_base nls_iso8859-1 nls_cp437 ; do
+            # 查找模块文件，可能是 .ko 或 .ko.gz
+            file=$(sudo find mnt/lib/modules/$KERNEL_VERSION -name "${mod}.ko*" | head -n 1)
+            if [ -n "$file" ]; then
+              if echo "$file" | grep -q '\.ko\.gz$'; then
+                sudo zcat "$file" > initrd_modules/${mod}.ko
+              elif echo "$file" | grep -q '\.ko$'; then
+                sudo cp "$file" initrd_modules/
+              fi
+            fi
+          done
+          sudo umount mnt
+          sudo losetup -d /dev/loop0
 
       - name: Create Custom Initramfs (Installer)
         run: |
-          mkdir -p initrd_root/bin initrd_root/sbin initrd_root/etc initrd_root/dev initrd_root/proc initrd_root/sys initrd_root/mnt initrd_root/mnt_test initrd_root/iso
+          # 原有目录创建（已存在）
+          mkdir -p initrd_root/bin initrd_root/sbin initrd_root/etc initrd_root/dev \
+                   initrd_root/proc initrd_root/sys initrd_root/mnt initrd_root/mnt_test initrd_root/iso
+          # 新增：创建模块目录并复制提取的模块
+          mkdir -p initrd_root/lib/modules/${KERNEL_VERSION}
+          cp initrd_modules/*.ko initrd_root/lib/modules/${KERNEL_VERSION}/
           cp $(which busybox) initrd_root/bin/busybox
           
+          # 生成 init 脚本（在原有基础上插入 insmod 部分）
           cat << 'EOF' > initrd_root/init
           #!/bin/busybox sh
           /bin/busybox --install -s /bin
           mount -t proc proc /proc
           mount -t sysfs sysfs /sys
           mount -t devtmpfs devtmpfs /dev 2>/dev/null || mdev -s
-          
+          # ==================== 新增：加载必要内核模块 ====================
+          KVER=$(uname -r)
+          MODPATH=/lib/modules/$KVER
+          insmod $MODPATH/nls_base.ko
+          insmod $MODPATH/nls_iso8859-1.ko
+          insmod $MODPATH/nls_cp437.ko
+          insmod $MODPATH/cdrom.ko
+          insmod $MODPATH/sr_mod.ko
+          insmod $MODPATH/isofs.ko
+          # ==============================================================
           echo "===================================================="
           echo "      ImmortalWrt Unattended Automated Installer     "
           echo "===================================================="
