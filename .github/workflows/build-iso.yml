@@ -143,7 +143,7 @@ jobs:
           sudo umount mnt
           sudo losetup -d /dev/loop0    
           
-            - name: Create Custom Initramfs (Installer)
+      - name: Create Custom Initramfs (Installer)
         run: |
           mkdir -p initrd_root/bin initrd_root/sbin initrd_root/etc initrd_root/dev \
                    initrd_root/proc initrd_root/sys initrd_root/mnt initrd_root/mnt_test
