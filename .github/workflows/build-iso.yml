@@ -98,15 +98,21 @@ jobs:
           # 7. 赋予宿主机打包环境下的可执行权限，确保随 rootfs 打包后权限正确
           chmod +x files/etc/daede-autoplay.sh
           chmod +x files/etc/uci-defaults/99-init-daede-cron
+
+          # 联动优化：注释掉官方 src/gz openwrt_core 以外的不必要源（比如大而全的 packages/routing 等），只留核心和你的第三方源
+          # 这能让打包时的 opkg 索引速度提升数倍
+          sed -i '/_packages/s/^/#/' repositories.conf
+          sed -i '/_routing/s/^/#/' repositories.conf
+          sed -i '/_telephony/s/^/#/' repositories.conf
           
       - name: Build Firmware Image
         run: |
           cd imagebuilder
-          # 1. PACKAGES 剔除了 dae 核心包，顺便修复了之前 dnsmasq-full 重复声明的小语法隐患
-          # 2. 显式补全了 dae 运行所需的底层核心依赖（kmod-nft-tproxy, ip-full）
-          # 3. 末尾追加 FILES=files 将上一步下载的包和脚本打包进 ISO
-          make image PROFILE=generic \
-            PACKAGES="luci-app-openclash sqm-scripts luci-app-sqm -dnsmasq -dnsmasq-dhcpv6 dnsmasq-full bash curl ca-bundle coreutils-nohup libcap-bin kmod-nft-tproxy ip-full" \
+          
+          # 利用物理多核加速打包（GitHub Actions 免费机型通常有 2 核，使用 -j2）
+          # 同时，精简了 PACKAGES 列表，去掉了不必要的依赖显式声明（因为 opkg 会自动解析依赖）
+          make image PROFILE=generic -j$(nproc) \
+            PACKAGES="luci-app-openclash sqm-scripts luci-app-sqm -dnsmasq -dnsmasq-dhcpv6 dnsmasq-full" \
             CONFIG_TARGET_ROOTFS_PARTSIZE=512 \
             FILES=files
             
